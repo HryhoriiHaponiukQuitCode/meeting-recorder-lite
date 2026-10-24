@@ -16,7 +16,7 @@
 |---|---|
 | 1. Дослідження й архітектура | готово: [docs/01-research-and-architecture.md](docs/01-research-and-architecture.md) |
 | 2. CLI для Windows | готово: [docs/02-stage2-windows-cli.md](docs/02-stage2-windows-cli.md) |
-| 3–6. macOS, надійність, трей, інсталятори | готово: [docs/03-stages-3-6.md](docs/03-stages-3-6.md) |
+| 3–6. macOS, надійність, вікно програми, інсталятори | готово: [docs/03-stages-3-6.md](docs/03-stages-3-6.md) |
 | 7. Завантаження на сервер | пізніше |
 
 ## Встановлення
@@ -26,7 +26,7 @@
 - **macOS 13+:** `Meeting Recorder_<версія>_aarch64.dmg`. Перетягніть програму в «Програми»; перший запуск — правий клік → «Відкрити».
 - **Windows 10/11:** `meeting-recorder_<версія>_x64-setup.exe`. Встановлюється для поточного користувача, права адміністратора не потрібні.
 
-Програма живе в рядку меню (macOS) або в треї (Windows): **Почати запис → Зупинити запис → Відкрити папку записів**.
+Відкрийте **Meeting Recorder** з «Програм» (macOS) або меню «Пуск» (Windows): **Почати запис → Зупинити запис → Відкрити папку записів**.
 
 ## Збірка
 
@@ -36,7 +36,7 @@
 cargo build --release -p recorder-cli -p recorder-tray
 ```
 
-- `target/release/meeting-recorder` — трей-застосунок.
+- `target/release/meeting-recorder` — програма з вікном.
 - `target/release/recorder` — консольна версія.
 - На Windows обидва файли мають розширення `.exe`.
 
@@ -78,7 +78,7 @@ crates/recorder-core     часова шкала, дрейф, Opus/Ogg, част
 crates/recorder-capture  мікрофон (cpal), WASAPI loopback, Core Audio tap, ScreenCaptureKit, дозволи, сон
 crates/recorder-app      сесія запису в окремому потоці, повідомлення, налаштування, логи
 crates/recorder-cli      консольна програма `recorder`
-crates/recorder-tray     трей-застосунок `meeting-recorder`
+crates/recorder-tray     програма з вікном `meeting-recorder` (egui)
 packaging/               Info.plist, entitlements, іконки
 ```
 

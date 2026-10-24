@@ -1,212 +1,96 @@
-//! Meeting Recorder tray app: one menu with Start / Stop / Open folder /
-//! Quit, a timer and level meters in the icon. All recording work happens
-//! in `recorder_app::Recorder` on its own thread; this file is only UI.
+//! Meeting Recorder window app: Start / Stop, timer, level meters for both
+//! channels, warnings and settings. All recording work happens in
+//! `recorder_app::Recorder` on its own thread; this file is only UI.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-mod icon;
+mod assets;
 
 use std::fs::File;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, Layout, RichText, Sense, TextureHandle, ViewportCommand,
+    vec2,
+};
 use recorder_app::settings::Settings;
 use recorder_app::{
     APP_NAME, AecMode, CONSENT_REMINDER, Notice, Recorder, RecorderOptions, Source, Status,
     SystemOption, logging, paths,
 };
-use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-const UI_INTERVAL: Duration = Duration::from_millis(200);
+/// How often the window refreshes while recording (timer, meters).
+const REFRESH: Duration = Duration::from_millis(200);
 
-enum UserEvent {
-    Menu(MenuEvent),
-}
+const RED: Color32 = Color32::from_rgb(222, 49, 56);
+const GREEN: Color32 = Color32::from_rgb(52, 199, 89);
+const AMBER: Color32 = Color32::from_rgb(240, 150, 10);
 
-struct Items {
-    status: MenuItem,
-    levels: MenuItem,
-    notice: MenuItem,
-    start: MenuItem,
-    stop: MenuItem,
-    open: MenuItem,
-    aec_auto: CheckMenuItem,
-    aec_on: CheckMenuItem,
-    aec_off: CheckMenuItem,
-    consent: CheckMenuItem,
-    folder: MenuItem,
-    logs: MenuItem,
-    quit: MenuItem,
-}
-
-impl Items {
-    fn new() -> Self {
-        Self {
-            status: MenuItem::new("Не записує", false, None),
-            levels: MenuItem::new(levels_text(None), false, None),
-            notice: MenuItem::new("Готово до запису", false, None),
-            start: MenuItem::new("Почати запис", true, None),
-            stop: MenuItem::new("Зупинити запис", false, None),
-            open: MenuItem::new("Відкрити папку записів", true, None),
-            aec_auto: CheckMenuItem::new("Авто (лише для динаміків)", true, false, None),
-            aec_on: CheckMenuItem::new("Завжди", true, false, None),
-            aec_off: CheckMenuItem::new("Вимкнено", true, false, None),
-            consent: CheckMenuItem::new("Нагадувати про згоду на запис", true, false, None),
-            folder: MenuItem::new("Змінити папку записів…", true, None),
-            logs: MenuItem::new("Відкрити журнали", true, None),
-            quit: MenuItem::new("Вийти", true, None),
-        }
-    }
-
-    fn menu(&self) -> Result<Menu> {
-        let aec = Submenu::with_items(
-            "Придушення луни",
-            true,
-            &[&self.aec_auto, &self.aec_on, &self.aec_off],
-        )?;
-        let settings = Submenu::with_items(
-            "Налаштування",
-            true,
-            &[
-                &aec,
-                &self.consent,
-                &self.folder,
-                &PredefinedMenuItem::separator(),
-                &self.logs,
-                &MenuItem::new(format!("Версія {}", env!("CARGO_PKG_VERSION")), false, None),
-            ],
-        )?;
-        let menu = Menu::new();
-        menu.append_items(&[
-            &self.status,
-            &self.levels,
-            &self.notice,
-            &PredefinedMenuItem::separator(),
-            &self.start,
-            &self.stop,
-            &self.open,
-            &PredefinedMenuItem::separator(),
-            &settings,
-            &self.quit,
-        ])?;
-        Ok(menu)
-    }
-
-    fn show_settings(&self, s: &Settings) {
-        self.aec_auto.set_checked(s.aec == AecMode::Auto);
-        self.aec_on.set_checked(s.aec == AecMode::On);
-        self.aec_off.set_checked(s.aec == AecMode::Off);
-        self.consent.set_checked(!s.consent_reminder_dismissed);
-    }
+struct Message {
+    text: String,
+    problem: bool,
+    /// macOS: the privacy pane that fixes this problem.
+    settings_pane: Option<&'static str>,
 }
 
 struct App {
-    items: Items,
-    tray: Option<TrayIcon>,
     settings: Settings,
     recorder: Option<Recorder>,
-    /// Last problem reported during this recording, shown in the menu.
-    problem: Option<String>,
-    last_icon: Option<icon::Dot>,
-    last_ui: Instant,
+    status: Option<Status>,
+    message: Option<Message>,
+    logo: TextureHandle,
+    show_consent: bool,
+    consent_dont_ask: bool,
+    confirm_close: bool,
+    closing: bool,
+    title: String,
     /// `--smoke-test <seconds>`: record right away, then stop and quit.
     smoke_until: Option<Instant>,
 }
 
 impl App {
-    fn new() -> Self {
-        let settings = Settings::load();
-        let items = Items::new();
-        items.show_settings(&settings);
-        Self {
-            items,
-            tray: None,
-            settings,
+    fn new(cc: &eframe::CreationContext<'_>, smoke_test: Option<u64>) -> Self {
+        let (px, w, h) = assets::decode(assets::LOGO_PNG);
+        let logo = cc.egui_ctx.load_texture(
+            "logo",
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut app = Self {
+            settings: Settings::load(),
             recorder: None,
-            problem: None,
-            last_icon: None,
-            last_ui: Instant::now(),
+            status: None,
+            message: None,
+            logo,
+            show_consent: false,
+            consent_dont_ask: false,
+            confirm_close: false,
+            closing: false,
+            title: APP_NAME.to_string(),
             smoke_until: None,
+        };
+        if let Some(seconds) = smoke_test {
+            // Hidden developer option for checking permissions and capture in
+            // the real bundle; skips the consent reminder.
+            tracing::info!(seconds, "smoke test");
+            app.begin();
+            app.smoke_until = Some(Instant::now() + Duration::from_secs(seconds));
         }
-    }
-
-    fn create_tray(&mut self) -> Result<()> {
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(self.items.menu()?))
-            .with_tooltip(APP_NAME)
-            .with_icon(make_icon(icon::Dot::Idle))
-            .build()
-            .context("cannot create the tray icon")?;
-        self.tray = Some(tray);
-        self.refresh();
-        Ok(())
-    }
-
-    fn on_menu(&mut self, ev: MenuEvent) -> bool {
-        let id = ev.id;
-        let it = &self.items;
-        if id == *it.start.id() {
-            self.start();
-        } else if id == *it.stop.id() {
-            self.stop();
-        } else if id == *it.open.id() {
-            paths::open_in_file_manager(&self.settings.recordings_dir());
-        } else if id == *it.aec_auto.id() {
-            self.set_aec(AecMode::Auto);
-        } else if id == *it.aec_on.id() {
-            self.set_aec(AecMode::On);
-        } else if id == *it.aec_off.id() {
-            self.set_aec(AecMode::Off);
-        } else if id == *it.consent.id() {
-            self.settings.consent_reminder_dismissed = !it.consent.is_checked();
-            self.save_settings();
-        } else if id == *it.folder.id() {
-            self.change_folder();
-        } else if id == *it.logs.id() {
-            paths::open_in_file_manager(&paths::log_dir());
-        } else if id == *it.quit.id() {
-            self.stop();
-            return false;
-        }
-        true
+        app
     }
 
     fn start(&mut self) {
-        if self.recorder.is_some() || !self.confirm_consent() {
+        if self.recorder.is_some() {
             return;
         }
-        self.begin();
-    }
-
-    /// The one-time legal reminder; `false` = the user cancelled.
-    fn confirm_consent(&mut self) -> bool {
-        if !self.settings.consent_reminder_dismissed {
-            let result = MessageDialog::new()
-                .set_level(MessageLevel::Info)
-                .set_title(APP_NAME)
-                .set_description(format!("{CONSENT_REMINDER}\n\nПочати запис?"))
-                .set_buttons(MessageButtons::YesNoCancelCustom(
-                    "Почати".into(),
-                    "Почати й більше не нагадувати".into(),
-                    "Скасувати".into(),
-                ))
-                .show();
-            match result {
-                MessageDialogResult::Custom(s) if s == "Почати" => {}
-                MessageDialogResult::Custom(s) if s.starts_with("Почати й") => {
-                    self.settings.consent_reminder_dismissed = true;
-                    self.save_settings();
-                    self.items.show_settings(&self.settings);
-                }
-                MessageDialogResult::Yes | MessageDialogResult::Ok => {}
-                _ => return false,
-            }
+        if self.settings.consent_reminder_dismissed {
+            self.begin();
+        } else {
+            self.consent_dont_ask = false;
+            self.show_consent = true;
         }
-        true
     }
 
     fn begin(&mut self) {
@@ -220,63 +104,70 @@ impl App {
         };
         match Recorder::start(opts) {
             Ok(r) => {
-                tracing::info!(dir = %r.status().dir.display(), "recording started from tray");
+                tracing::info!(dir = %r.status().dir.display(), "recording started from the window");
+                self.status = Some(r.status());
                 self.recorder = Some(r);
-                self.problem = None;
+                self.message = None;
             }
             Err(e) => {
                 tracing::error!(error = %e, "cannot start recording");
-                error_dialog(&format!("Не вдалося почати запис: {e:#}"));
+                self.message = Some(Message {
+                    text: format!("Не вдалося почати запис: {e:#}"),
+                    problem: true,
+                    settings_pane: None,
+                });
             }
         }
-        self.refresh();
     }
 
     fn stop(&mut self) {
         let Some(r) = self.recorder.take() else {
             return;
         };
-        let dir = r.status().dir;
         self.drain_notices(&r);
+        let dir = r.status().dir;
+        self.status = None;
         match r.stop() {
             Ok(m) => {
                 let seconds: u64 = m.parts.iter().map(|p| p.duration_ms).sum::<u64>() / 1000;
-                tracing::info!(dir = %dir.display(), seconds, "recording stopped from tray");
-                self.items.notice.set_text(format!(
-                    "Останній запис: {} ({})",
-                    folder_name(&dir),
-                    hms(seconds)
-                ));
+                tracing::info!(dir = %dir.display(), seconds, "recording stopped from the window");
+                let keep_problem = self.message.as_ref().is_some_and(|m| m.problem);
+                if !keep_problem {
+                    self.message = Some(Message {
+                        text: format!("Збережено: {} ({})", folder_name(&dir), hms(seconds)),
+                        problem: false,
+                        settings_pane: None,
+                    });
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "recording ended with an error");
-                error_dialog(&format!("Запис завершився з помилкою: {e:#}"));
+                self.message = Some(Message {
+                    text: format!("Запис завершився з помилкою: {e:#}"),
+                    problem: true,
+                    settings_pane: None,
+                });
             }
         }
-        self.problem = None;
-        self.refresh();
     }
 
-    fn set_aec(&mut self, mode: AecMode) {
-        self.settings.aec = mode;
-        self.save_settings();
-        self.items.show_settings(&self.settings);
-        if self.recorder.is_some() {
-            self.items
-                .notice
-                .set_text("Придушення луни зміниться з наступного запису");
-        }
-    }
-
-    fn change_folder(&mut self) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Папка для записів")
-            .set_directory(self.settings.recordings_dir())
-            .pick_folder();
-        if let Some(dir) = picked {
-            tracing::info!(dir = %dir.display(), "recordings folder changed");
-            self.settings.recordings_dir = Some(dir);
-            self.save_settings();
+    fn drain_notices(&mut self, r: &Recorder) {
+        while let Some(n) = r.try_notice() {
+            tracing::info!(notice = ?n, "notice");
+            // Information never hides an unresolved problem.
+            if !n.is_problem() && self.message.as_ref().is_some_and(|m| m.problem) {
+                continue;
+            }
+            let settings_pane = match &n {
+                Notice::PermissionDenied(Source::Mic) => Some("Privacy_Microphone"),
+                Notice::PermissionDenied(Source::System) => Some("Privacy_ScreenCapture"),
+                _ => None,
+            };
+            self.message = Some(Message {
+                text: n.message(),
+                problem: n.is_problem(),
+                settings_pane: settings_pane.filter(|_| cfg!(target_os = "macos")),
+            });
         }
     }
 
@@ -286,97 +177,341 @@ impl App {
         }
     }
 
-    fn drain_notices(&mut self, r: &Recorder) {
-        while let Some(n) = r.try_notice() {
-            tracing::info!(notice = ?n, "notice");
-            let text = n.message();
-            if n.is_problem() {
-                self.problem = Some(text.clone());
+    /// Notices, a session that ended on its own, the smoke-test timer.
+    fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(r) = self.recorder.take() {
+            self.drain_notices(&r);
+            let st = r.status();
+            let running = st.running;
+            self.status = Some(st);
+            self.recorder = Some(r);
+            if !running {
+                // Stopped by itself (write error): collect the result.
+                self.stop();
             }
-            match &n {
-                Notice::PermissionDenied(source) => permission_dialog(*source, &text),
-                Notice::WriteFailed(_) => error_dialog(&text),
-                _ => {}
-            }
-            self.items.notice.set_text(text);
         }
-    }
-
-    /// Called every `UI_INTERVAL`: notices, finished sessions, icon and menu.
-    fn tick(&mut self) {
-        self.last_ui = Instant::now();
-        let Some(r) = self.recorder.take() else {
-            return;
-        };
-        self.drain_notices(&r);
-        if r.status().running {
-            self.recorder = Some(r);
-        } else {
-            // The session ended on its own (write error); collect the result.
-            self.recorder = Some(r);
+        if self.smoke_until.is_some_and(|t| Instant::now() >= t) {
+            self.smoke_until = None;
             self.stop();
+            self.closing = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
-        self.refresh();
+        if ctx.input(|i| i.viewport().close_requested()) && self.recorder.is_some() && !self.closing
+        {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.confirm_close = true;
+        }
     }
 
-    fn refresh(&mut self) {
-        let status = self.recorder.as_ref().map(Recorder::status);
-        let it = &self.items;
-        it.start.set_enabled(status.is_none());
-        it.stop.set_enabled(status.is_some());
-        let dot = match &status {
-            None => icon::Dot::Idle,
-            Some(_) if self.problem.is_some() => icon::Dot::Problem,
-            Some(_) => icon::Dot::Recording,
-        };
-        match &status {
-            None => {
-                it.status.set_text("Не записує");
-                it.levels.set_text(levels_text(None));
+    fn header(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(36.0, 36.0)));
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(APP_NAME).size(20.0).strong());
+                ui.label(RichText::new("Запис онлайн-дзвінків").weak());
+            });
+        });
+    }
+
+    fn recording_panel(&mut self, ui: &mut egui::Ui) {
+        let st = self.status.clone();
+        ui.vertical_centered(|ui| {
+            let elapsed = st.as_ref().map_or(0, |s| s.elapsed_ms / 1000);
+            ui.label(RichText::new(hms(elapsed)).size(44.0).monospace());
+            let caption = match &st {
+                None => RichText::new("Не записує").weak(),
+                Some(s) => RichText::new(format!("Іде запис · частина {}", s.part)).color(RED),
+            };
+            ui.label(caption);
+            ui.add_space(10.0);
+            let (text, fill) = if st.is_some() {
+                ("Зупинити запис", Color32::from_gray(90))
+            } else {
+                ("Почати запис", RED)
+            };
+            let button = egui::Button::new(RichText::new(text).size(17.0).color(Color32::WHITE))
+                .fill(fill)
+                .corner_radius(10.0)
+                .min_size(vec2(ui.available_width(), 46.0));
+            if ui.add(button).clicked() {
+                if st.is_some() {
+                    self.stop();
+                } else {
+                    self.start();
+                }
             }
-            Some(st) => {
-                it.status.set_text(format!(
-                    "● Запис {}  ·  частина {}",
-                    hms(st.elapsed_ms / 1000),
-                    st.part
-                ));
-                it.levels.set_text(levels_text(Some(st)));
-            }
-        }
-        let Some(tray) = &self.tray else {
+        });
+        ui.add_space(14.0);
+        let levels = st.as_ref().map(|s| s.levels);
+        meter(ui, "Мікрофон (ви)", levels.map(|l| l[0]));
+        ui.add_space(6.0);
+        meter(ui, "Системний звук (співрозмовники)", levels.map(|l| l[1]));
+    }
+
+    fn message_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = &self.message else {
             return;
         };
-        if self.last_icon != Some(dot) {
-            self.last_icon = Some(dot);
-            if let Err(e) = tray.set_icon(Some(make_icon(dot))) {
-                tracing::warn!(error = %e, "cannot update the tray icon");
-            }
-        }
-        let timer = status.as_ref().map(|st| hms(st.elapsed_ms / 1000));
-        #[cfg(target_os = "macos")]
-        tray.set_title(timer.as_deref());
-        let tooltip = match (&timer, &self.problem) {
-            (None, _) => APP_NAME.to_string(),
-            (Some(t), None) => format!("{APP_NAME} — запис {t}"),
-            (Some(t), Some(p)) => format!("{APP_NAME} — запис {t}\n⚠ {p}"),
+        let stroke = if m.problem {
+            AMBER
+        } else {
+            ui.visuals().weak_text_color()
         };
-        let _ = tray.set_tooltip(Some(tooltip));
+        let text = if m.problem {
+            AMBER
+        } else {
+            ui.visuals().text_color()
+        };
+        let mut open_pane = None;
+        let mut dismiss = false;
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0_f32, stroke))
+            .corner_radius(8.0)
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(&m.text).color(text));
+                ui.horizontal(|ui| {
+                    if let Some(pane) = m.settings_pane
+                        && ui.button("Відкрити налаштування").clicked()
+                    {
+                        open_pane = Some(pane);
+                    }
+                    if ui.small_button("Сховати").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+        if let Some(pane) = open_pane {
+            open_privacy_settings(pane);
+        }
+        if dismiss {
+            self.message = None;
+        }
+    }
+
+    fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Налаштування")
+            .id_salt("settings")
+            .show(ui, |ui| {
+                ui.label("Придушення луни в каналі мікрофона:");
+                let before = self.settings.aec;
+                ui.radio_value(
+                    &mut self.settings.aec,
+                    AecMode::Auto,
+                    "Авто — лише коли звук іде в динаміки",
+                );
+                ui.radio_value(&mut self.settings.aec, AecMode::On, "Завжди");
+                ui.radio_value(&mut self.settings.aec, AecMode::Off, "Вимкнено");
+                if self.settings.aec != before {
+                    self.save_settings();
+                    if self.recorder.is_some() {
+                        self.message = Some(Message {
+                            text: "Придушення луни зміниться з наступного запису.".into(),
+                            problem: false,
+                            settings_pane: None,
+                        });
+                    }
+                }
+                ui.add_space(6.0);
+                let mut remind = !self.settings.consent_reminder_dismissed;
+                if ui
+                    .checkbox(&mut remind, "Нагадувати про згоду перед записом")
+                    .changed()
+                {
+                    self.settings.consent_reminder_dismissed = !remind;
+                    self.save_settings();
+                }
+                ui.add_space(6.0);
+                ui.label("Папка записів:");
+                ui.label(
+                    RichText::new(self.settings.recordings_dir().display().to_string())
+                        .small()
+                        .weak(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Змінити…").clicked() {
+                        let picked = rfd::FileDialog::new()
+                            .set_title("Папка для записів")
+                            .set_directory(self.settings.recordings_dir())
+                            .pick_folder();
+                        if let Some(dir) = picked {
+                            tracing::info!(dir = %dir.display(), "recordings folder changed");
+                            self.settings.recordings_dir = Some(dir);
+                            self.save_settings();
+                        }
+                    }
+                    if ui.button("Відкрити журнали").clicked() {
+                        paths::open_in_file_manager(&paths::log_dir());
+                    }
+                });
+            });
+    }
+
+    fn consent_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_consent {
+            return;
+        }
+        let mut start = false;
+        let response = egui::Modal::new(egui::Id::new("consent")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.label(RichText::new("Перед записом").size(17.0).strong());
+            ui.add_space(6.0);
+            ui.label(CONSENT_REMINDER);
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.consent_dont_ask, "Більше не нагадувати");
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(red_button("Почати запис")).clicked() {
+                    start = true;
+                }
+                if ui.button("Скасувати").clicked() {
+                    self.show_consent = false;
+                }
+            });
+        });
+        if response.should_close() {
+            self.show_consent = false;
+        }
+        if start {
+            self.show_consent = false;
+            if self.consent_dont_ask {
+                self.settings.consent_reminder_dismissed = true;
+                self.save_settings();
+            }
+            self.begin();
+        }
+    }
+
+    fn close_modal(&mut self, ctx: &egui::Context) {
+        if !self.confirm_close {
+            return;
+        }
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::new("close")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.label(RichText::new("Іде запис").size(17.0).strong());
+            ui.add_space(6.0);
+            ui.label("Зупинити запис і закрити програму? Усе записане буде збережено.");
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(red_button("Зупинити й закрити")).clicked() {
+                    close = true;
+                }
+                if ui.button("Продовжити запис").clicked() {
+                    self.confirm_close = false;
+                }
+            });
+        });
+        if response.should_close() {
+            self.confirm_close = false;
+        }
+        if close {
+            self.confirm_close = false;
+            self.stop();
+            self.closing = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
     }
 }
 
-fn make_icon(dot: icon::Dot) -> Icon {
-    let (rgba, size) = icon::render(dot);
-    Icon::from_rgba(rgba, size, size).expect("valid icon size")
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll(ctx);
+        let title = match &self.status {
+            Some(st) => format!("● {} — {APP_NAME}", hms(st.elapsed_ms / 1000)),
+            None => APP_NAME.to_string(),
+        };
+        // Every viewport command triggers a repaint, so send only changes.
+        if title != self.title {
+            ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+
+        egui::TopBottomPanel::bottom("footer")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(16, 8)),
+            )
+            .show(ctx, |ui| {
+                ui.label(RichText::new(CONSENT_REMINDER).small().weak());
+                ui.label(
+                    RichText::new(format!("Версія {}", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .weak(),
+                );
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::same(16)))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.header(ui);
+                    ui.add_space(14.0);
+                    self.recording_panel(ui);
+                    ui.add_space(12.0);
+                    self.message_panel(ui);
+                    ui.add_space(8.0);
+                    let open = egui::Button::new("Відкрити папку записів")
+                        .min_size(vec2(ui.available_width(), 32.0));
+                    if ui.add(open).clicked() {
+                        paths::open_in_file_manager(&self.settings.recordings_dir());
+                    }
+                    ui.add_space(8.0);
+                    self.settings_panel(ui);
+                });
+            });
+        self.consent_modal(ctx);
+        self.close_modal(ctx);
+
+        if self.recorder.is_some() || self.smoke_until.is_some() {
+            ctx.request_repaint_after(REFRESH);
+        }
+    }
+
+    /// Cmd+Q and logout skip the close confirmation; the session is still
+    /// closed cleanly before the process exits.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop();
+    }
 }
 
-fn levels_text(st: Option<&Status>) -> String {
-    let bar = |peak: f32| {
-        let n = icon::level_steps(peak) as usize;
-        format!("{}{}", "▮".repeat(n), "▯".repeat(icon::STEPS as usize - n))
+impl Drop for App {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn red_button(text: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE)).fill(RED)
+}
+
+/// A labelled level bar: 0 dBFS full, −60 dBFS empty.
+fn meter(ui: &mut egui::Ui, label: &str, peak: Option<f32>) {
+    ui.label(RichText::new(label).small());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(5), ui.visuals().extreme_bg_color);
+    let Some(peak) = peak else {
+        return;
     };
-    match st {
-        None => "Мікрофон / система: —".into(),
-        Some(st) => format!("Мік {}   Система {}", bar(st.levels[0]), bar(st.levels[1])),
+    let db = if peak > 0.0 {
+        20.0 * peak.log10()
+    } else {
+        -120.0
+    };
+    let fill = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    if fill > 0.0 {
+        let mut bar = rect;
+        bar.set_width(rect.width() * fill);
+        let color = if db > -3.0 {
+            RED
+        } else if db > -12.0 {
+            AMBER
+        } else {
+            GREEN
+        };
+        painter.rect_filled(bar, CornerRadius::same(5), color);
     }
 }
 
@@ -391,45 +526,20 @@ fn folder_name(dir: &std::path::Path) -> String {
         .into_owned()
 }
 
-fn error_dialog(text: &str) {
-    MessageDialog::new()
-        .set_level(MessageLevel::Error)
-        .set_title(APP_NAME)
-        .set_description(text)
-        .set_buttons(MessageButtons::Ok)
-        .show();
+fn open_privacy_settings(pane: &str) {
+    #[cfg(target_os = "macos")]
+    recorder_capture::macos::permissions::open_privacy_settings(pane);
+    #[cfg(not(target_os = "macos"))]
+    let _ = pane;
 }
 
-fn permission_dialog(source: Source, text: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let result = MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title(APP_NAME)
-            .set_description(text)
-            .set_buttons(MessageButtons::OkCancelCustom(
-                "Відкрити налаштування".into(),
-                "Закрити".into(),
-            ))
-            .show();
-        if matches!(&result, MessageDialogResult::Custom(s) if s.starts_with("Відкрити")) {
-            let pane = match source {
-                Source::Mic => "Privacy_Microphone",
-                Source::System => "Privacy_ScreenCapture",
-            };
-            recorder_capture::macos::permissions::open_privacy_settings(pane);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = source;
-        MessageDialog::new()
-            .set_level(MessageLevel::Warning)
-            .set_title(APP_NAME)
-            .set_description(text)
-            .set_buttons(MessageButtons::Ok)
-            .show();
-    }
+fn error_dialog(text: &str) {
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(APP_NAME)
+        .set_description(text)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
 }
 
 /// Keeps a second copy of the app from starting.
@@ -450,65 +560,29 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1)?.parse::<u64>().ok());
     let Some(_instance) = single_instance() else {
         tracing::warn!("another instance is running");
-        error_dialog("Meeting Recorder уже запущено — шукайте його значок у треї.");
+        error_dialog("Meeting Recorder уже запущено.");
         return Ok(());
     };
 
-    #[allow(unused_mut)]
-    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    #[cfg(target_os = "macos")]
-    {
-        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
-        event_loop.set_activation_policy(ActivationPolicy::Accessory);
-    }
-    let proxy = event_loop.create_proxy();
-    MenuEvent::set_event_handler(Some(move |e| {
-        let _ = proxy.send_event(UserEvent::Menu(e));
-    }));
-
-    let mut app = App::new();
-    event_loop.run(move |event, _, control_flow| {
-        match event {
-            // The tray must be created once the loop runs (macOS requirement).
-            Event::NewEvents(StartCause::Init) => {
-                if let Err(e) = app.create_tray() {
-                    tracing::error!(error = %e, "tray init failed");
-                    error_dialog(&format!("Не вдалося створити значок у треї: {e:#}"));
-                    *control_flow = ControlFlow::Exit;
-                    return;
-                }
-                if let Some(seconds) = smoke_test {
-                    // Hidden developer option for checking permissions and
-                    // capture in the real bundle; skips the consent dialog.
-                    tracing::info!(seconds, "smoke test");
-                    app.begin();
-                    app.smoke_until = Some(Instant::now() + Duration::from_secs(seconds));
-                }
-            }
-            Event::UserEvent(UserEvent::Menu(ev)) => {
-                if !app.on_menu(ev) {
-                    app.tray = None;
-                    tracing::info!("quit");
-                    *control_flow = ControlFlow::Exit;
-                    return;
-                }
-            }
-            Event::LoopDestroyed => app.stop(),
-            _ => {}
-        }
-        if app.smoke_until.is_some_and(|t| Instant::now() >= t) {
-            app.stop();
-            app.tray = None;
-            *control_flow = ControlFlow::Exit;
-            return;
-        }
-        if app.recorder.is_some() {
-            if app.last_ui.elapsed() >= UI_INTERVAL {
-                app.tick();
-            }
-            *control_flow = ControlFlow::WaitUntil(app.last_ui + UI_INTERVAL);
-        } else if *control_flow != ControlFlow::Exit {
-            *control_flow = ControlFlow::Wait;
-        }
-    });
+    let (rgba, width, height) = assets::decode(assets::APP_ICON_PNG);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title(APP_NAME)
+            .with_inner_size([380.0, 560.0])
+            .with_min_inner_size([340.0, 460.0])
+            .with_icon(Arc::new(egui::IconData {
+                rgba,
+                width,
+                height,
+            })),
+        ..Default::default()
+    };
+    eframe::run_native(
+        APP_NAME,
+        options,
+        Box::new(move |cc| Ok(Box::new(App::new(cc, smoke_test)))),
+    )
+    .map_err(|e| anyhow::anyhow!("cannot open the window: {e}"))?;
+    tracing::info!("quit");
+    Ok(())
 }

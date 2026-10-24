@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Builds the app and tray icons from packaging/quitcode-logo.svg.
+"""Builds the app icons and the window logo from packaging/quitcode-logo.svg.
 
 Writes packaging/icons/*.png (app icon on a rounded tile), icon.ico and
-tray.png (the bare logo, 64 px). Needs `resvg` on PATH
+logo.png (the bare logo, 128 px, shown in the window). Needs `resvg` on PATH
 (`cargo install resvg --locked`)."""
 
 import re
@@ -62,7 +62,7 @@ def main():
         pngs = {16: small[16], 32: (OUT / "32x32.png").read_bytes(), 48: small[48],
                 256: (OUT / "256x256.png").read_bytes()}
         (OUT / "icon.ico").write_bytes(ico(sorted(pngs.items())))
-    render(LOGO, 64, OUT / "tray.png")
+    render(LOGO, 128, OUT / "logo.png")
     print("written to", OUT)
 
 

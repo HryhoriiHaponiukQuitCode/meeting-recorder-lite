@@ -448,10 +448,20 @@ fn handle_event(
         } => {
             tracing::info!(source = source.as_str(), %device, rate, channels, "device opened");
             let was_failing = std::mem::take(&mut states[idx(source)].failing);
-            let first = engine.session().manifest().events.iter().all(|e| {
-                e.kind != "device_opened"
-                    || e.data.get("source").and_then(|s| s.as_str()) != Some(source.as_str())
-            });
+            // The device this source last opened; a reopen of the same device
+            // (stream error, sample-rate change) is not worth telling about.
+            let previous = engine
+                .session()
+                .manifest()
+                .events
+                .iter()
+                .rev()
+                .find(|e| {
+                    e.kind == "device_opened"
+                        && e.data.get("source").and_then(|s| s.as_str()) == Some(source.as_str())
+                })
+                .and_then(|e| e.data.get("device")?.as_str().map(str::to_owned));
+            let changed = previous.as_ref().is_some_and(|p| *p != device);
             if source == Source::Mic {
                 let name = device.clone();
                 let _ = engine
@@ -459,11 +469,11 @@ fn handle_event(
                     .update_manifest(|m| m.devices.mic = Some(name));
                 status.lock().expect("status").mic_device = Some(device.clone());
             } else {
-                apply_output(engine, opts.aec, notices, !first);
+                apply_output(engine, opts.aec, notices, changed);
                 status.lock().expect("status").output_device =
                     engine.session().manifest().devices.output.clone();
             }
-            if !first || was_failing {
+            if changed || was_failing {
                 let _ = notices.send(Notice::DeviceChanged {
                     source,
                     device: device.clone(),

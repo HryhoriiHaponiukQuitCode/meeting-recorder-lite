@@ -15,8 +15,7 @@ recorder-app.workspace = true
 recorder-capture.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tray-icon = "0.26.1"
-tao = "0.37.2"
+eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts"] }
 rfd = { version = "0.17.2", default-features = false }
 png = "0.18.1"
 
@@ -42,7 +41,6 @@ resources = ["../../THIRD_PARTY_NOTICES.md", "../../README.md"]
 
 [package.metadata.packager.macos]
 minimum-system-version = "13.0"
-background-app = true
 # "-" = ad-hoc signature (local builds, CI artifacts). Release builds replace
 # it with a Developer ID identity; see .github/workflows/release.yml.
 signing-identity = "-"

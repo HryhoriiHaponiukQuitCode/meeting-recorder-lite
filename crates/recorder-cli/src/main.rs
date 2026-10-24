@@ -20,7 +20,7 @@ use recorder_app::{
 };
 use recorder_capture::{mic, output};
 use recorder_core::decode::{decode_part, rms_dbfs, write_wav};
-use recorder_core::manifest::Manifest;
+use recorder_core::manifest::{Manifest, PartStatus};
 use recorder_core::{MIC, SYSTEM};
 
 #[derive(Parser)]
@@ -292,7 +292,8 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
             Ok(d) => {
                 let secs = d.left.len() as f64 / 16_000.0;
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                let match_manifest = d.left.len() as u64 == p.duration_ms * 16;
+                // Recovered parts end on a page granule, so allow the 1 ms rounding.
+                let match_manifest = (d.left.len() as i64 - p.duration_ms as i64 * 16).abs() < 16;
                 ok &= match_manifest;
                 println!(
                     "  {}  {:>8.2} с  {:>6.2} МБ ({:.1} МБ/год)  L {:>6.1} dBFS  R {:>6.1} dBFS  {}{}",
@@ -306,10 +307,10 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
                     },
                     rms_dbfs(&d.left),
                     rms_dbfs(&d.right),
-                    if d.complete {
-                        "закрита"
-                    } else {
-                        "без EOS"
+                    match (d.complete, p.status) {
+                        (true, _) => "закрита",
+                        (false, PartStatus::Recovered) => "відновлена після збою",
+                        (false, _) => "без EOS",
                     },
                     if match_manifest {
                         ""
