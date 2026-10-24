@@ -1,58 +1,39 @@
 #!/usr/bin/env python3
-"""Draws the app icon (dark rounded square, red dot, two level bars) and
-writes packaging/icons/*.png and icon.ico. Pure standard library."""
+"""Builds the app and tray icons from packaging/quitcode-logo.svg.
 
-import math
+Writes packaging/icons/*.png (app icon on a rounded tile), icon.ico and
+tray.png (the bare logo, 64 px). Needs `resvg` on PATH
+(`cargo install resvg --locked`)."""
+
+import re
 import struct
-import zlib
+import subprocess
+import tempfile
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent / "icons"
+HERE = Path(__file__).resolve().parent
+OUT = HERE / "icons"
+LOGO = HERE / "quitcode-logo.svg"
 
 
-def coverage_round_rect(x, y, x0, y0, x1, y1, r):
-    cx = min(max(x, x0 + r), x1 - r)
-    cy = min(max(y, y0 + r), y1 - r)
-    d = math.hypot(x - cx, y - cy)
-    return min(max(r + 0.5 - d, 0.0), 1.0)
+def logo_body():
+    """The logo's <defs> and <g> content, to embed in another SVG."""
+    svg = LOGO.read_text()
+    return svg[svg.index(">", svg.index("<svg")) + 1:svg.rindex("</svg>")]
 
 
-def draw(size):
-    s = size / 1024.0
-    px = bytearray(size * size * 4)
-    bg = (28, 28, 30)
-    red = (255, 59, 48)
-    green = (52, 199, 89)
-    bars = [(600, 330, 690, 760), (760, 470, 850, 760)]  # x0, top, x1, bottom
-    for y in range(size):
-        for x in range(size):
-            fx, fy = (x + 0.5) / s, (y + 0.5) / s
-            a = coverage_round_rect(fx, fy, 64, 64, 960, 960, 200) if s else 0
-            a = min(1.0, a * 1.0)
-            rgb = bg
-            if a > 0:
-                d = math.hypot(fx - 380, fy - 512)
-                c = min(max((190 + 0.5 / s - d) * s, 0.0), 1.0)
-                if c > 0:
-                    rgb = tuple(round(bg[i] * (1 - c) + red[i] * c) for i in range(3))
-                for x0, top, x1, bottom in bars:
-                    c = coverage_round_rect(fx, fy, x0, top, x1, bottom, 45)
-                    c = min(max(c, 0.0), 1.0)
-                    if c > 0:
-                        rgb = tuple(round(rgb[i] * (1 - c) + green[i] * c) for i in range(3))
-            i = (y * size + x) * 4
-            px[i:i + 4] = bytes((*rgb, round(a * 255)))
-    return bytes(px)
+def tile_svg():
+    # macOS icon grid: 824 px body with ~185 px corners on a 1024 canvas.
+    s = 600 / 106.68
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#ffffff"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185" fill="none" stroke="#000" stroke-opacity="0.08"/>
+  <g transform="translate(212 212) scale({s:.5f})">{logo_body()}</g>
+</svg>"""
 
 
-def png(size, rgba):
-    raw = b"".join(b"\x00" + rgba[y * size * 4:(y + 1) * size * 4] for y in range(size))
-
-    def chunk(kind, data):
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+def render(svg_path, size, out):
+    subprocess.run(["resvg", "-w", str(size), "-h", str(size), str(svg_path), str(out)], check=True)
 
 
 def ico(images):
@@ -69,12 +50,19 @@ def ico(images):
 
 def main():
     OUT.mkdir(exist_ok=True)
-    pngs = {}
-    for size in (16, 32, 48, 128, 256, 512, 1024):
-        pngs[size] = png(size, draw(size))
-    for size in (32, 128, 256, 512, 1024):
-        (OUT / f"{size}x{size}.png").write_bytes(pngs[size])
-    (OUT / "icon.ico").write_bytes(ico([(s, pngs[s]) for s in (16, 32, 48, 256)]))
+    with tempfile.TemporaryDirectory() as tmp:
+        tile = Path(tmp) / "tile.svg"
+        tile.write_text(tile_svg())
+        for size in (32, 128, 256, 512, 1024):
+            render(tile, size, OUT / f"{size}x{size}.png")
+        small = {}
+        for size in (16, 48):
+            render(tile, size, Path(tmp) / f"{size}.png")
+            small[size] = (Path(tmp) / f"{size}.png").read_bytes()
+        pngs = {16: small[16], 32: (OUT / "32x32.png").read_bytes(), 48: small[48],
+                256: (OUT / "256x256.png").read_bytes()}
+        (OUT / "icon.ico").write_bytes(ico(sorted(pngs.items())))
+    render(LOGO, 64, OUT / "tray.png")
     print("written to", OUT)
 
 

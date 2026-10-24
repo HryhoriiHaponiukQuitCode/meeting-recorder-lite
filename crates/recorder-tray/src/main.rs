@@ -111,7 +111,7 @@ struct App {
     recorder: Option<Recorder>,
     /// Last problem reported during this recording, shown in the menu.
     problem: Option<String>,
-    last_icon: Option<(icon::Dot, [u8; 2])>,
+    last_icon: Option<icon::Dot>,
     last_ui: Instant,
     /// `--smoke-test <seconds>`: record right away, then stop and quit.
     smoke_until: Option<Instant>,
@@ -138,7 +138,7 @@ impl App {
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(self.items.menu()?))
             .with_tooltip(APP_NAME)
-            .with_icon(make_icon(icon::Dot::Idle, [0, 0]))
+            .with_icon(make_icon(icon::Dot::Idle))
             .build()
             .context("cannot create the tray icon")?;
         self.tray = Some(tray);
@@ -324,19 +324,10 @@ impl App {
         let it = &self.items;
         it.start.set_enabled(status.is_none());
         it.stop.set_enabled(status.is_some());
-        let (dot, bars) = match &status {
-            None => (icon::Dot::Idle, [0, 0]),
-            Some(st) => (
-                if self.problem.is_some() {
-                    icon::Dot::Problem
-                } else {
-                    icon::Dot::Recording
-                },
-                [
-                    icon::level_steps(st.levels[0]),
-                    icon::level_steps(st.levels[1]),
-                ],
-            ),
+        let dot = match &status {
+            None => icon::Dot::Idle,
+            Some(_) if self.problem.is_some() => icon::Dot::Problem,
+            Some(_) => icon::Dot::Recording,
         };
         match &status {
             None => {
@@ -355,9 +346,9 @@ impl App {
         let Some(tray) = &self.tray else {
             return;
         };
-        if self.last_icon != Some((dot, bars)) {
-            self.last_icon = Some((dot, bars));
-            if let Err(e) = tray.set_icon(Some(make_icon(dot, bars))) {
+        if self.last_icon != Some(dot) {
+            self.last_icon = Some(dot);
+            if let Err(e) = tray.set_icon(Some(make_icon(dot))) {
                 tracing::warn!(error = %e, "cannot update the tray icon");
             }
         }
@@ -373,8 +364,9 @@ impl App {
     }
 }
 
-fn make_icon(dot: icon::Dot, bars: [u8; 2]) -> Icon {
-    Icon::from_rgba(icon::render(dot, bars), icon::SIZE, icon::SIZE).expect("valid icon size")
+fn make_icon(dot: icon::Dot) -> Icon {
+    let (rgba, size) = icon::render(dot);
+    Icon::from_rgba(rgba, size, size).expect("valid icon size")
 }
 
 fn levels_text(st: Option<&Status>) -> String {

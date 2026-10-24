@@ -2104,6 +2104,7 @@ name = "recorder-tray"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "png",
  "recorder-app",
  "recorder-capture",
  "rfd",
