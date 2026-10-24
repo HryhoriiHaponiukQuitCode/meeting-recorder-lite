@@ -17,5 +17,5 @@ pub use recorder_core::recovery::{Recovered, recover_all};
 pub const APP_NAME: &str = "Meeting Recorder";
 
 /// Text shown before recording starts (spec: legal reminder).
-pub const CONSENT_REMINDER: &str = "Ви відповідаєте за отримання згоди всіх учасників розмови на запис \
-відповідно до законодавства (GDPR, місцеві закони).";
+pub const CONSENT_REMINDER: &str = "You are responsible for getting consent from everyone in the call \
+before recording, as the law requires (GDPR, local laws).";

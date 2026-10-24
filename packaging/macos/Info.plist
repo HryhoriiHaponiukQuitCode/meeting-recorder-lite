@@ -4,12 +4,12 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Meeting Recorder записує ваш голос у лівий канал файлу розмови.</string>
+  <string>Meeting Recorder records your voice into the left channel of the call recording.</string>
   <key>NSAudioCaptureUsageDescription</key>
-  <string>Meeting Recorder записує звук співрозмовників (системний звук) у правий канал файлу розмови.</string>
+  <string>Meeting Recorder records the other participants (system audio) into the right channel of the call recording.</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.productivity</string>
   <key>NSHumanReadableCopyright</key>
-  <string>Meeting Recorder contributors. Користувач відповідає за згоду учасників на запис.</string>
+  <string>Meeting Recorder contributors. The user is responsible for the participants' consent to recording.</string>
 </dict>
 </plist>

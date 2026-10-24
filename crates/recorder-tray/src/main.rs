@@ -29,9 +29,9 @@ const REFRESH: Duration = Duration::from_millis(33);
 const REFRESH_MINIMIZED: Duration = Duration::from_secs(1);
 
 #[cfg(target_os = "macos")]
-const REVEAL: &str = "Показати у Finder";
+const REVEAL: &str = "Show in Finder";
 #[cfg(not(target_os = "macos"))]
-const REVEAL: &str = "Показати в Провіднику";
+const REVEAL: &str = "Show in Explorer";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -169,11 +169,11 @@ impl App {
         let total = self.permissions.len();
         let mut request = None;
         ui::card(ui, |ui| {
-            ui::card_header(ui, "Потрібні дозволи", |ui| {
-                ui::pill(ui, &format!("{granted} з {total}"), ui::Tone::Amber, false);
+            ui::card_header(ui, "Permissions needed", |ui| {
+                ui::pill(ui, &format!("{granted} of {total}"), ui::Tone::Amber, false);
             });
             ui.label(ui::muted(
-                "Щоб записувати ваш голос і голоси співрозмовників.",
+                "To record your voice and the other participants.",
             ));
             ui.add_space(ui::S2);
             for (perm, access) in self.permissions.clone() {
@@ -191,18 +191,18 @@ impl App {
                     ui.label(RichText::new(perm.title()).font(FontId::new(14.0, ui::medium())));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| match access {
                         Access::Granted => {
-                            ui::pill(ui, "Дозволено", ui::Tone::Green, false);
+                            ui::pill(ui, "Allowed", ui::Tone::Green, false);
                         }
                         Access::NotAsked if asking => {
-                            ui::pill(ui, "Чекаю відповіді…", ui::Tone::Grey, false);
+                            ui::pill(ui, "Waiting…", ui::Tone::Grey, false);
                         }
                         Access::NotAsked => {
-                            if ui::primary(ui, "Дозволити", None, None, false).clicked() {
+                            if ui::primary(ui, "Allow", None, None, false).clicked() {
                                 request = Some(perm);
                             }
                         }
                         Access::Denied => {
-                            if ui::outline(ui, "Увімкнути", None, false).clicked() {
+                            if ui::outline(ui, "Turn on", None, false).clicked() {
                                 permissions::open_settings(perm);
                             }
                         }
@@ -212,7 +212,7 @@ impl App {
             if self.permissions.iter().any(|(_, a)| *a == Access::Denied) {
                 ui.add_space(ui::S1);
                 ui.label(ui::muted(
-                    "Доступ було відхилено, тому macOS більше не питає. «Увімкнути» відкриє потрібний розділ налаштувань: увімкніть перемикач навпроти Meeting Recorder — програма побачить це одразу.",
+                    "Access was denied, so macOS will not ask again. “Turn on” opens the right page in System Settings: switch on Meeting Recorder there and the app picks it up at once.",
                 ));
             }
         });
@@ -253,7 +253,7 @@ impl App {
             Err(e) => {
                 tracing::error!(error = %e, "cannot start recording");
                 self.message = Some(Message {
-                    text: format!("Не вдалося почати запис: {e:#}"),
+                    text: format!("Could not start recording: {e:#}"),
                     problem: true,
                 });
             }
@@ -292,7 +292,7 @@ impl App {
             Err(e) => {
                 tracing::error!(error = %e, "recording ended with an error");
                 self.message = Some(Message {
-                    text: format!("Запис завершився з помилкою: {e:#}"),
+                    text: format!("Recording ended with an error: {e:#}"),
                     problem: true,
                 });
             }
@@ -408,7 +408,7 @@ impl App {
                     .color(ui::INK),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui::icon_button(ui, ui::Icon::Settings, "Налаштування").clicked() {
+                if ui::icon_button(ui, ui::Icon::Settings, "Settings").clicked() {
                     self.view = View::Settings;
                 }
             });
@@ -419,23 +419,23 @@ impl App {
     fn transport(&mut self, ui: &mut egui::Ui) {
         let st = self.status.clone();
         ui::card(ui, |ui| {
-            ui::card_header(ui, "Запис дзвінка", |ui| match &st {
+            ui::card_header(ui, "Call recording", |ui| match &st {
                 None => {
-                    ui::pill(ui, "Готово", ui::Tone::Blue, false);
+                    ui::pill(ui, "Ready", ui::Tone::Blue, false);
                 }
                 Some(s) => {
                     if s.paused {
-                        ui::pill(ui, "Пауза", ui::Tone::Amber, false);
+                        ui::pill(ui, "Paused", ui::Tone::Amber, false);
                     } else {
-                        ui::pill(ui, "Іде запис", ui::Tone::Red, true);
+                        ui::pill(ui, "Recording", ui::Tone::Red, true);
                     }
                     if s.part > 1 {
-                        ui::pill(ui, &format!("Частина {}", s.part), ui::Tone::Grey, false);
+                        ui::pill(ui, &format!("Part {}", s.part), ui::Tone::Grey, false);
                     }
                 }
             });
             ui.add_space(ui::S2);
-            ui.label(ui::caption("Тривалість"));
+            ui.label(ui::caption("Duration"));
             let elapsed = st.as_ref().map_or(0, |s| s.elapsed_ms / 1000);
             ui.label(
                 RichText::new(hms(elapsed))
@@ -448,8 +448,7 @@ impl App {
             );
             ui.add_space(ui::S3);
             let Some(s) = &st else {
-                if ui::primary(ui, "Почати запис", Some(ui::Icon::Mic), None, true).clicked()
-                {
+                if ui::primary(ui, "Start recording", Some(ui::Icon::Mic), None, true).clicked() {
                     self.start();
                 }
                 return;
@@ -458,23 +457,18 @@ impl App {
             let (mut toggle, mut stop) = (false, false);
             ui.columns(2, |cols| {
                 toggle = if paused {
-                    ui::primary(&mut cols[0], "Продовжити", Some(ui::Icon::Play), None, true)
+                    ui::primary(&mut cols[0], "Resume", Some(ui::Icon::Play), None, true)
                 } else {
                     ui::outline(
                         &mut cols[0],
-                        "Пауза",
+                        "Pause",
                         Some((ui::Icon::Pause, ui::INK)),
                         true,
                     )
                 }
                 .clicked();
-                stop = ui::outline(
-                    &mut cols[1],
-                    "Зупинити",
-                    Some((ui::Icon::Stop, ui::RED)),
-                    true,
-                )
-                .clicked();
+                stop = ui::outline(&mut cols[1], "Stop", Some((ui::Icon::Stop, ui::RED)), true)
+                    .clicked();
             });
             if toggle {
                 self.set_paused(!paused);
@@ -488,14 +482,14 @@ impl App {
     fn channels(&self, ui: &mut egui::Ui) {
         let levels = self.status.as_ref().map(|s| s.levels);
         ui::card(ui, |ui| {
-            ui::card_header(ui, "Канали", |_| {});
+            ui::card_header(ui, "Channels", |_| {});
             ui.add_space(ui::S1);
             let rows = [
-                (ui::Icon::Mic, "Ви", "мікрофон", levels.map(|l| l[0])),
+                (ui::Icon::Mic, "You", "microphone", levels.map(|l| l[0])),
                 (
                     ui::Icon::Speaker,
-                    "Співрозмовники",
-                    "системний звук",
+                    "Others",
+                    "system audio",
                     levels.map(|l| l[1]),
                 ),
             ];
@@ -514,9 +508,9 @@ impl App {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 let text = match peak {
                                     None => "—".to_string(),
-                                    Some(_) if level < 0.005 => "тиша".to_string(),
+                                    Some(_) if level < 0.005 => "silent".to_string(),
                                     // A real minus sign, not a hyphen.
-                                    Some(_) => format!("{:.0} дБ", level * 60.0 - 60.0)
+                                    Some(_) => format!("{:.0} dB", level * 60.0 - 60.0)
                                         .replace('-', "\u{2212}"),
                                 };
                                 ui.label(ui::muted(text));
@@ -543,7 +537,7 @@ impl App {
             ui.horizontal_top(|ui| {
                 ui::icon_tile(ui, icon, tone);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui::close_button(ui, "Сховати").clicked() {
+                    if ui::close_button(ui, "Dismiss").clicked() {
                         dismiss = true;
                     }
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
@@ -561,16 +555,16 @@ impl App {
     fn last_recording(&self, ui: &mut egui::Ui) {
         ui::card(ui, |ui| {
             let Some(last) = &self.last else {
-                ui::card_header(ui, "Записи", |_| {});
-                ui.label(ui::muted("Тут з'явиться останній запис."));
+                ui::card_header(ui, "Recordings", |_| {});
+                ui.label(ui::muted("Your last recording will appear here."));
                 ui.add_space(ui::S1);
-                if ui::link(ui, "Відкрити папку записів").clicked() {
+                if ui::link(ui, "Open recordings folder").clicked() {
                     paths::open_in_file_manager(&self.settings.recordings_dir());
                 }
                 return;
             };
-            ui::card_header(ui, "Останній запис", |ui| {
-                ui::pill(ui, "Збережено", ui::Tone::Green, false);
+            ui::card_header(ui, "Last recording", |ui| {
+                ui::pill(ui, "Saved", ui::Tone::Green, false);
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new(when(last.started)).color(ui::INK));
@@ -585,7 +579,7 @@ impl App {
                     paths::open_in_file_manager(&last.dir);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui::link(ui, "Усі записи").clicked() {
+                    if ui::link(ui, "All recordings").clicked() {
                         paths::open_in_file_manager(&self.settings.recordings_dir());
                     }
                 });
@@ -612,12 +606,12 @@ impl App {
 
     fn settings_screen(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui::icon_button(ui, ui::Icon::Back, "Назад").clicked() {
+            if ui::icon_button(ui, ui::Icon::Back, "Back").clicked() {
                 self.view = View::Main;
             }
             ui.add_space(ui::S1);
             ui.label(
-                RichText::new("Налаштування")
+                RichText::new("Settings")
                     .font(FontId::new(18.0, ui::bold()))
                     .color(ui::INK),
             );
@@ -629,44 +623,44 @@ impl App {
         ui::card(ui, |ui| self.recordings_settings(ui));
         ui.add_space(ui::S3);
         ui::card(ui, |ui| {
-            ui::card_header(ui, "Діагностика", |ui| {
-                ui.label(ui::muted(format!("Версія {}", env!("CARGO_PKG_VERSION"))));
+            ui::card_header(ui, "Diagnostics", |ui| {
+                ui.label(ui::muted(format!("Version {}", env!("CARGO_PKG_VERSION"))));
             });
             ui.label(ui::muted(
-                "Журнали допоможуть розібратися, якщо із записом щось не так.",
+                "Logs help find out what went wrong with a recording.",
             ));
             ui.add_space(ui::S1);
-            if ui::link(ui, "Відкрити журнали").clicked() {
+            if ui::link(ui, "Open logs").clicked() {
                 paths::open_in_file_manager(&paths::log_dir());
             }
         });
     }
 
     fn echo_settings(&mut self, ui: &mut egui::Ui) {
-        ui::card_header(ui, "Придушення луни", |_| {});
+        ui::card_header(ui, "Echo cancellation", |_| {});
         ui.add_space(ui::S1);
         let changed = ui::segmented(
             ui,
             &mut self.settings.aec,
             &[
-                (AecMode::Auto, "Авто"),
-                (AecMode::On, "Завжди"),
-                (AecMode::Off, "Вимкнено"),
+                (AecMode::Auto, "Auto"),
+                (AecMode::On, "Always"),
+                (AecMode::Off, "Off"),
             ],
         );
         let hint = match self.settings.aec {
             AecMode::Auto => {
-                "Вмикається, коли звук іде в динаміки, і прибирає голоси співрозмовників із вашого каналу."
+                "Turns on when sound plays through speakers and removes the other participants from your channel."
             }
-            AecMode::On => "Завжди очищати канал мікрофона від звуку з динаміків.",
-            AecMode::Off => "Мікрофон пишеться без обробки. Підходить для навушників.",
+            AecMode::On => "Always remove speaker sound from the microphone channel.",
+            AecMode::Off => "The microphone is recorded as is. Best with headphones.",
         };
         ui.label(ui::muted(hint));
         if changed {
             self.save_settings();
             if self.recorder.is_some() {
                 self.message = Some(Message {
-                    text: "Придушення луни зміниться з наступного запису.".into(),
+                    text: "Echo cancellation changes from the next recording.".into(),
                     problem: false,
                 });
             }
@@ -674,15 +668,15 @@ impl App {
     }
 
     fn recordings_settings(&mut self, ui: &mut egui::Ui) {
-        ui::card_header(ui, "Записи", |_| {});
+        ui::card_header(ui, "Recordings", |_| {});
         ui.add_space(ui::S1);
-        ui.label(ui::caption("Папка"));
+        ui.label(ui::caption("Folder"));
         ui.label(RichText::new(tilde(&self.settings.recordings_dir())).color(ui::INK));
         ui.add_space(ui::S2);
         ui.horizontal(|ui| {
-            if ui::outline(ui, "Змінити…", None, false).clicked() {
+            if ui::outline(ui, "Change…", None, false).clicked() {
                 let picked = rfd::FileDialog::new()
-                    .set_title("Папка для записів")
+                    .set_title("Recordings folder")
                     .set_directory(self.settings.recordings_dir())
                     .pick_folder();
                 if let Some(dir) = picked {
@@ -691,8 +685,7 @@ impl App {
                     self.save_settings();
                 }
             }
-            if ui::outline(ui, "Відкрити", Some((ui::Icon::Folder, ui::BLUE)), false).clicked()
-            {
+            if ui::outline(ui, "Open", Some((ui::Icon::Folder, ui::BLUE)), false).clicked() {
                 paths::open_in_file_manager(&self.settings.recordings_dir());
             }
         });
@@ -702,10 +695,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(
-                    RichText::new("Нагадувати про згоду").font(FontId::new(14.0, ui::medium())),
-                );
-                ui.label(ui::muted("Перед кожним записом"));
+                ui.label(RichText::new("Consent reminder").font(FontId::new(14.0, ui::medium())));
+                ui.label(ui::muted("Before every recording"));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut remind = !self.settings.consent_reminder_dismissed;
@@ -728,20 +719,21 @@ impl App {
             .frame(ui::modal_frame())
             .show(ctx, |ui| {
                 ui.set_width(296.0);
-                modal_title(ui, "Перед записом");
+                modal_title(ui, "Before you record");
                 ui.label(RichText::new(CONSENT_REMINDER).color(ui::INK_SECONDARY));
                 ui.add_space(ui::S3);
                 ui.horizontal(|ui| {
                     ui::toggle(ui, &mut self.consent_dont_ask);
-                    ui.label(RichText::new("Більше не нагадувати").color(ui::INK_SECONDARY));
+                    ui.label(RichText::new("Don't remind me again").color(ui::INK_SECONDARY));
                 });
                 ui.add_space(ui::S4);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui::primary(ui, "Почати запис", Some(ui::Icon::Mic), None, false).clicked()
+                    if ui::primary(ui, "Start recording", Some(ui::Icon::Mic), None, false)
+                        .clicked()
                     {
                         start = true;
                     }
-                    if ui::outline(ui, "Скасувати", None, false).clicked() {
+                    if ui::outline(ui, "Cancel", None, false).clicked() {
                         self.show_consent = false;
                     }
                 });
@@ -768,20 +760,17 @@ impl App {
             .frame(ui::modal_frame())
             .show(ctx, |ui| {
                 ui.set_width(296.0);
-                modal_title(ui, "Іде запис");
+                modal_title(ui, "Recording in progress");
                 ui.label(
-                    RichText::new(
-                        "Зупинити запис і закрити програму? Усе записане буде збережено.",
-                    )
-                    .color(ui::INK_SECONDARY),
+                    RichText::new("Stop recording and quit? Everything recorded so far is saved.")
+                        .color(ui::INK_SECONDARY),
                 );
                 ui.add_space(ui::S4);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui::primary(ui, "Зупинити й закрити", None, None, false).clicked()
-                    {
+                    if ui::primary(ui, "Stop and quit", None, None, false).clicked() {
                         close = true;
                     }
-                    if ui::outline(ui, "Продовжити", None, false).clicked() {
+                    if ui::outline(ui, "Resume", None, false).clicked() {
                         self.confirm_close = false;
                     }
                 });
@@ -800,7 +789,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         let title = match &self.status {
-            Some(st) if st.paused => format!("Пауза {} — {APP_NAME}", hms(st.elapsed_ms / 1000)),
+            Some(st) if st.paused => format!("Paused {} — {APP_NAME}", hms(st.elapsed_ms / 1000)),
             Some(st) => format!("● {} — {APP_NAME}", hms(st.elapsed_ms / 1000)),
             None => APP_NAME.to_string(),
         };
@@ -893,27 +882,27 @@ fn hms(s: u64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
-/// "Сьогодні о 20:36", "Учора о 09:05", "24.10 о 20:36".
+/// "Today at 20:36", "Yesterday at 09:05", "24 Oct at 20:36".
 fn when(t: DateTime<Utc>) -> String {
     let local = t.with_timezone(&Local);
     let today = Local::now().date_naive();
     let day = local.date_naive();
     let prefix = if day == today {
-        "Сьогодні".to_string()
+        "Today".to_string()
     } else if today.pred_opt() == Some(day) {
-        "Учора".to_string()
+        "Yesterday".to_string()
     } else {
-        local.format("%d.%m").to_string()
+        local.format("%-d %b").to_string()
     };
-    format!("{prefix} о {}", local.format("%H:%M"))
+    format!("{prefix} at {}", local.format("%H:%M"))
 }
 
-/// "7 с", "12 хв 5 с", "1 год 2 хв".
+/// "7 s", "12 min 5 s", "1 h 2 min".
 fn duration_words(s: u64) -> String {
     match (s / 3600, s / 60 % 60, s % 60) {
-        (0, 0, sec) => format!("{sec} с"),
-        (0, min, sec) => format!("{min} хв {sec} с"),
-        (h, min, _) => format!("{h} год {min} хв"),
+        (0, 0, sec) => format!("{sec} s"),
+        (0, min, sec) => format!("{min} min {sec} s"),
+        (h, min, _) => format!("{h} h {min} min"),
     }
 }
 
@@ -981,7 +970,7 @@ fn main() -> Result<()> {
     let dev = dev_options();
     let Some(_instance) = single_instance() else {
         tracing::warn!("another instance is running");
-        error_dialog("Meeting Recorder уже запущено.");
+        error_dialog("Meeting Recorder is already running.");
         return Ok(());
     };
 

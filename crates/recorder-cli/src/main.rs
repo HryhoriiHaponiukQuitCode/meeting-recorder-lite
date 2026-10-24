@@ -27,10 +27,10 @@ use recorder_core::{MIC, SYSTEM};
 #[command(
     name = "recorder",
     version,
-    about = "Meeting Recorder: записує мікрофон (L) і системний звук (R) в Ogg Opus"
+    about = "Meeting Recorder: records the microphone (L) and system audio (R) to Ogg Opus"
 )]
 struct Cli {
-    /// Папка із записами (за замовчуванням Documents/Meeting Recorder/recordings).
+    /// Recordings folder (default: Documents/Meeting Recorder/recordings).
     #[arg(long, global = true)]
     out: Option<PathBuf>,
     #[command(subcommand)]
@@ -39,19 +39,19 @@ struct Cli {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum SystemArg {
-    /// Типовий спосіб для ОС.
+    /// The usual method for this OS.
     Auto,
     /// macOS 14.4+: Core Audio process tap.
     Tap,
     /// macOS: ScreenCaptureKit.
     Sck,
-    /// Без системного звуку.
+    /// No system audio.
     Off,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum AecArg {
-    /// Лише коли звук іде в динаміки.
+    /// Only when sound plays through speakers.
     Auto,
     On,
     Off,
@@ -59,41 +59,41 @@ enum AecArg {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Почати запис; Ctrl+C — зупинити.
+    /// Start recording; Ctrl+C stops.
     Start {
-        /// Довжина однієї частини, хвилин.
+        /// Length of one part, minutes.
         #[arg(long)]
         part_minutes: Option<u32>,
-        /// Довжина частини в секундах (для тестів; перекриває --part-minutes).
+        /// Part length in seconds (for tests; overrides --part-minutes).
         #[arg(long, hide = true)]
         part_seconds: Option<u32>,
-        /// Мікрофон: частина назви пристрою (за замовчуванням — системний).
+        /// Microphone: part of the device name (default: the system default).
         #[arg(long)]
         mic: Option<String>,
-        /// Джерело системного звуку.
+        /// Source of system audio.
         #[arg(long, value_enum, default_value_t = SystemArg::Auto)]
         system: SystemArg,
-        /// Windows: записувати звук лише цієї програми, напр. Zoom.exe.
+        /// Windows: record only this program's audio, e.g. Zoom.exe.
         #[arg(long)]
         process: Option<String>,
-        /// Не записувати системний звук (те саме, що --system off).
+        /// Do not record system audio (same as --system off).
         #[arg(long, hide = true)]
         no_system: bool,
-        /// Придушення луни в каналі мікрофона.
+        /// Echo cancellation of the microphone channel.
         #[arg(long, value_enum)]
         aec: Option<AecArg>,
-        /// Сумарний бітрейт, кбіт/с (обидва канали).
+        /// Total bitrate, kbit/s (both channels).
         #[arg(long)]
         bitrate_kbps: Option<u32>,
     },
-    /// Показати аудіопристрої.
+    /// List audio devices.
     Devices,
-    /// Закрити сесії, що лишилися відкритими після збою.
+    /// Close sessions left open by a crash.
     Recover,
-    /// Декодувати сесію і показати тривалість та рівні каналів.
+    /// Decode a session and show durations and channel levels.
     Verify {
         session: PathBuf,
-        /// Також зберегти me.wav і them.wav (16 кГц моно) у папку сесії.
+        /// Also save me.wav and them.wav (16 kHz mono) in the session folder.
         #[arg(long)]
         wav: bool,
     },
@@ -146,11 +146,11 @@ fn main() -> Result<()> {
         Cmd::Recover => {
             let done = recover_all(&root);
             if done.is_empty() {
-                println!("Незакритих сесій немає ({}).", root.display());
+                println!("No unfinished sessions ({}).", root.display());
             }
             for r in done {
                 println!(
-                    "Відновлено: {} — частин: {}, {} с",
+                    "Recovered: {}, {} parts, {} s",
                     r.dir.display(),
                     r.parts,
                     r.duration_ms / 1000
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
 }
 
 fn record(opts: RecorderOptions) -> Result<()> {
-    println!("Нагадування: {CONSENT_REMINDER}");
+    println!("Reminder: {CONSENT_REMINDER}");
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -172,8 +172,8 @@ fn record(opts: RecorderOptions) -> Result<()> {
     }
     let recorder = Recorder::start(opts)?;
     let st = recorder.status();
-    println!("Запис у {}", st.dir.display());
-    println!("Ctrl+C — зупинити.");
+    println!("Recording to {}", st.dir.display());
+    println!("Press Ctrl+C to stop.");
     let mut announced = false;
     while !stop.load(Ordering::SeqCst) {
         while let Some(n) = recorder.try_notice() {
@@ -190,13 +190,9 @@ fn record(opts: RecorderOptions) -> Result<()> {
         if !announced && !st.system_capture.is_empty() {
             announced = true;
             eprintln!(
-                "Системний звук: {}, придушення луни: {}",
+                "System audio: {}, echo cancellation: {}",
                 st.system_capture,
-                if st.aec_on {
-                    "увімк."
-                } else {
-                    "вимк."
-                }
+                if st.aec_on { "on" } else { "off" }
             );
         }
         print_status(&st);
@@ -206,7 +202,7 @@ fn record(opts: RecorderOptions) -> Result<()> {
     let manifest = recorder.stop()?;
     let seconds: u64 = manifest.parts.iter().map(|p| p.duration_ms).sum::<u64>() / 1000;
     println!(
-        "Збережено: {} частин, {} — {}",
+        "Saved: {} parts, {} in {}",
         manifest.parts.len(),
         hms(seconds),
         st.dir.display()
@@ -217,7 +213,7 @@ fn record(opts: RecorderOptions) -> Result<()> {
 fn print_status(st: &recorder_app::Status) {
     use std::io::Write;
     eprint!(
-        "\r● {}  мік {}  система {}  частина {:04}  ",
+        "\r● {}  mic {}  system {}  part {:04}  ",
         hms(st.elapsed_ms / 1000),
         meter(st.levels[MIC]),
         meter(st.levels[SYSTEM]),
@@ -227,11 +223,11 @@ fn print_status(st: &recorder_app::Status) {
 }
 
 fn devices() {
-    println!("Мікрофони:");
+    println!("Microphones:");
     for d in mic::list_inputs() {
         println!("  {d}");
     }
-    println!("Пристрої виводу:");
+    println!("Output devices:");
     #[cfg(windows)]
     let outputs = recorder_capture::wasapi_loopback::list_render_devices();
     #[cfg(not(windows))]
@@ -241,7 +237,7 @@ fn devices() {
     }
     let o = output::default_output();
     println!(
-        "Вивід за замовчуванням: {} (тип: {}, ризик луни: {})",
+        "Default output: {} (kind: {}, echo risk: {})",
         o.name.unwrap_or_default(),
         o.kind,
         o.echo_risk
@@ -271,15 +267,15 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
     let manifest =
         Manifest::load(dir).with_context(|| format!("no manifest.json in {}", dir.display()))?;
     println!(
-        "Сесія {} — статус {:?}, система: {}",
+        "Session {}: status {:?}, system: {}",
         manifest.session_id, manifest.status, manifest.system_capture
     );
     println!(
-        "Мікрофон: {}",
+        "Microphone: {}",
         manifest.devices.mic.as_deref().unwrap_or("?")
     );
     println!(
-        "Вивід: {} ({}, луна: {})",
+        "Output: {} ({}, echo: {})",
         manifest.devices.output.as_deref().unwrap_or("?"),
         manifest.devices.output_kind,
         manifest.devices.echo_risk
@@ -296,7 +292,7 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
                 let match_manifest = (d.left.len() as i64 - p.duration_ms as i64 * 16).abs() < 16;
                 ok &= match_manifest;
                 println!(
-                    "  {}  {:>8.2} с  {:>6.2} МБ ({:.1} МБ/год)  L {:>6.1} dBFS  R {:>6.1} dBFS  {}{}",
+                    "  {}  {:>8.2} s  {:>6.2} MB ({:.1} MB/h)  L {:>6.1} dBFS  R {:>6.1} dBFS  {}{}",
                     p.file,
                     secs,
                     size as f64 / 1e6,
@@ -308,9 +304,9 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
                     rms_dbfs(&d.left),
                     rms_dbfs(&d.right),
                     match (d.complete, p.status) {
-                        (true, _) => "закрита",
-                        (false, PartStatus::Recovered) => "відновлена після збою",
-                        (false, _) => "без EOS",
+                        (true, _) => "closed",
+                        (false, PartStatus::Recovered) => "recovered after a crash",
+                        (false, _) => "no EOS",
                     },
                     if match_manifest {
                         ""
@@ -325,21 +321,21 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
             }
             Err(e) => {
                 ok = false;
-                println!("  {}  ПОМИЛКА: {e}", p.file);
+                println!("  {}  ERROR: {e}", p.file);
             }
         }
     }
     if wav {
         write_wav(&dir.join("me.wav"), &all_l)?;
         write_wav(&dir.join("them.wav"), &all_r)?;
-        println!("Збережено me.wav і them.wav у {}", dir.display());
+        println!("Saved me.wav and them.wav in {}", dir.display());
     }
     println!(
         "{}",
         if ok {
-            "OK: усі частини декодуються, тривалості збігаються з manifest."
+            "OK: all parts decode and durations match the manifest."
         } else {
-            "Є проблеми — див. вище."
+            "Problems found, see above."
         }
     );
     Ok(())

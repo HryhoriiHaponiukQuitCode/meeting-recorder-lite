@@ -266,7 +266,7 @@ pub fn muted(text: impl Into<String>) -> RichText {
     RichText::new(text).color(INK_MUTED).size(12.5)
 }
 
-/// The grey label above a value ("Тривалість").
+/// The grey label above a value ("Duration").
 pub fn caption(text: impl Into<String>) -> RichText {
     RichText::new(text).color(INK_SECONDARY).size(13.0)
 }
@@ -568,7 +568,7 @@ pub fn close_button(ui: &mut Ui, tooltip: &str) -> Response {
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A blue text link with a trailing arrow ("Усі записи →").
+/// A blue text link with a trailing arrow ("All recordings →").
 pub fn link(ui: &mut Ui, text: &str) -> Response {
     let galley = ui
         .painter()

@@ -641,40 +641,40 @@ impl Notice {
     pub fn message(&self) -> String {
         let name = |s: &Source| {
             if *s == Source::Mic {
-                "мікрофон"
+                "microphone"
             } else {
-                "системний звук"
+                "system audio"
             }
         };
         match self {
             Notice::Recovered(r) => format!(
-                "Відновлено запис після збою: {} ({} с)",
+                "Recovered a recording after a crash: {} ({} s)",
                 r.dir.file_name().unwrap_or_default().to_string_lossy(),
                 r.duration_ms / 1000
             ),
             Notice::PermissionDenied(Source::Mic) => {
-                "Немає дозволу на мікрофон. Дозвольте доступ у налаштуваннях приватності.".into()
+                "No permission to use the microphone. Allow access in Privacy settings.".into()
             }
             Notice::PermissionDenied(Source::System) => {
-                "Немає дозволу на запис системного звуку. Дозвольте доступ у налаштуваннях приватності.".into()
+                "No permission to record system audio. Allow access in Privacy settings.".into()
             }
             Notice::DeviceFailed { source, error } => {
-                format!("Не вдається відкрити {}: {error}. Пробую знову…", name(source))
+                format!("Cannot open the {}: {error}. Retrying…", name(source))
             }
-            Notice::DeviceChanged { source, device } => format!("{}: перемкнуто на «{device}»", name(source)),
+            Notice::DeviceChanged { source, device } => format!("{}: switched to “{device}”", name(source)),
             Notice::EchoRisk { aec_on: true } => {
-                "Звук іде в динаміки — увімкнено придушення луни. Для найкращої якості використовуйте навушники.".into()
+                "Sound is playing through speakers, so echo cancellation is on. Use headphones for the best quality.".into()
             }
             Notice::EchoRisk { aec_on: false } => {
-                "Звук іде в динаміки — мікрофон записуватиме й співрозмовників. Краще використовуйте навушники.".into()
+                "Sound is playing through speakers, so the microphone will also pick up the others. Headphones are better.".into()
             }
             Notice::SystemSilent => {
-                "Системний звук мовчить уже 2 хвилини, хоча мікрофон активний. Перевірте пристрій виводу.".into()
+                "System audio has been silent for 2 minutes while the microphone is active. Check the output device.".into()
             }
             Notice::Resumed { slept_s } => {
-                format!("Комп'ютер був у сні {slept_s} с — запис продовжено в новій частині.")
+                format!("The computer slept for {slept_s} s; recording continued in a new part.")
             }
-            Notice::WriteFailed(e) => format!("Помилка запису на диск: {e}. Запис зупинено."),
+            Notice::WriteFailed(e) => format!("Cannot write to disk: {e}. Recording stopped."),
         }
     }
 

@@ -20,8 +20,8 @@ pub enum Access {
 impl Permission {
     pub fn title(self) -> &'static str {
         match self {
-            Permission::Microphone => "Мікрофон",
-            Permission::SystemAudio => "Системний звук",
+            Permission::Microphone => "Microphone",
+            Permission::SystemAudio => "System audio",
         }
     }
 }
