@@ -1,0 +1,4 @@
+# Link the C runtime statically on Windows so recorder.exe runs without the
+# Visual C++ Redistributable. CI prints the DLL dependencies to confirm.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
