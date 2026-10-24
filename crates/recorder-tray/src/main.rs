@@ -19,12 +19,14 @@ use eframe::egui::{self, Align, FontId, Layout, RichText, TextureHandle, Viewpor
 use recorder_app::permissions::{self, Access, Permission};
 use recorder_app::settings::Settings;
 use recorder_app::{
-    APP_NAME, AecMode, CONSENT_REMINDER, Notice, Recorder, RecorderOptions, Source, Status,
-    SystemOption, logging, paths,
+    APP_NAME, AecMode, CONSENT_REMINDER, Notice, Recorder, RecorderOptions, Status, SystemOption,
+    logging, paths,
 };
 
-/// How often the window refreshes while recording (timer, meters).
-const REFRESH: Duration = Duration::from_millis(200);
+/// How often the window refreshes while recording: often enough for smooth
+/// level bars, and once a second when minimized (the title timer only).
+const REFRESH: Duration = Duration::from_millis(33);
+const REFRESH_MINIMIZED: Duration = Duration::from_secs(1);
 
 #[cfg(target_os = "macos")]
 const REVEAL: &str = "Показати у Finder";
@@ -40,8 +42,6 @@ enum View {
 struct Message {
     text: String,
     problem: bool,
-    /// macOS: the privacy pane that fixes this problem.
-    settings_pane: Option<&'static str>,
 }
 
 struct LastRecording {
@@ -255,7 +255,6 @@ impl App {
                 self.message = Some(Message {
                     text: format!("Не вдалося почати запис: {e:#}"),
                     problem: true,
-                    settings_pane: None,
                 });
             }
         }
@@ -295,7 +294,6 @@ impl App {
                 self.message = Some(Message {
                     text: format!("Запис завершився з помилкою: {e:#}"),
                     problem: true,
-                    settings_pane: None,
                 });
             }
         }
@@ -304,25 +302,20 @@ impl App {
     fn drain_notices(&mut self, r: &Recorder) {
         while let Some(n) = r.try_notice() {
             tracing::info!(notice = ?n, "notice");
-            if matches!(n, Notice::PermissionDenied(_)) {
+            match n {
                 // The permissions card shows this, with the button that fixes it.
-                self.permissions = current_permissions();
-                continue;
+                Notice::PermissionDenied(_) => self.permissions = current_permissions(),
+                // Only failures that lose audio reach the window; hints and
+                // status changes (echo risk, silence, device switch, sleep,
+                // recovery) stay in the log.
+                Notice::DeviceFailed { .. } | Notice::WriteFailed(_) => {
+                    self.message = Some(Message {
+                        text: n.message(),
+                        problem: true,
+                    });
+                }
+                _ => {}
             }
-            // Information never hides an unresolved problem.
-            if !n.is_problem() && self.message.as_ref().is_some_and(|m| m.problem) {
-                continue;
-            }
-            let settings_pane = match &n {
-                Notice::PermissionDenied(Source::Mic) => Some("Privacy_Microphone"),
-                Notice::PermissionDenied(Source::System) => Some("Privacy_ScreenCapture"),
-                _ => None,
-            };
-            self.message = Some(Message {
-                text: n.message(),
-                problem: n.is_problem(),
-                settings_pane: settings_pane.filter(|_| cfg!(target_os = "macos")),
-            });
         }
     }
 
@@ -512,24 +505,24 @@ impl App {
                 }
                 ui.horizontal(|ui| {
                     ui::icon_tile(ui, icon, ui::Tone::Blue);
+                    let level = ui::smooth_level(ui, name, peak);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = ui::S1 + 2.0;
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(name).font(FontId::new(14.0, ui::medium())));
                             ui.label(ui::muted(source));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let level = match peak.map(ui::to_db) {
-                                    // A real minus sign, not a hyphen.
-                                    Some(db) if db > -60.0 => {
-                                        format!("{db:.0} дБ").replace('-', "\u{2212}")
-                                    }
-                                    Some(_) => "тиша".to_string(),
+                                let text = match peak {
                                     None => "—".to_string(),
+                                    Some(_) if level < 0.005 => "тиша".to_string(),
+                                    // A real minus sign, not a hyphen.
+                                    Some(_) => format!("{:.0} дБ", level * 60.0 - 60.0)
+                                        .replace('-', "\u{2212}"),
                                 };
-                                ui.label(ui::muted(level));
+                                ui.label(ui::muted(text));
                             });
                         });
-                        ui::meter(ui, peak);
+                        ui::meter(ui, level);
                     });
                 });
             }
@@ -545,7 +538,6 @@ impl App {
         } else {
             (ui::Icon::Info, ui::Tone::Blue)
         };
-        let mut open_pane = None;
         let mut dismiss = false;
         ui::card(ui, |ui| {
             ui.horizontal_top(|ui| {
@@ -557,18 +549,10 @@ impl App {
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         ui.add_space(ui::S1);
                         ui.label(RichText::new(&m.text).color(ui::INK));
-                        if let Some(pane) = m.settings_pane
-                            && ui::link(ui, "Налаштування приватності").clicked()
-                        {
-                            open_pane = Some(pane);
-                        }
                     });
                 });
             });
         });
-        if let Some(pane) = open_pane {
-            open_privacy_settings(pane);
-        }
         if dismiss {
             self.message = None;
         }
@@ -684,7 +668,6 @@ impl App {
                 self.message = Some(Message {
                     text: "Придушення луни зміниться з наступного запису.".into(),
                     problem: false,
-                    settings_pane: None,
                 });
             }
         }
@@ -856,7 +839,12 @@ impl eframe::App for App {
         self.close_modal(ctx);
 
         if self.recorder.is_some() || self.smoke_until.is_some() || self.screenshot.is_some() {
-            ctx.request_repaint_after(REFRESH);
+            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+            ctx.request_repaint_after(if minimized {
+                REFRESH_MINIMIZED
+            } else {
+                REFRESH
+            });
         }
     }
 
@@ -948,13 +936,6 @@ fn save_png(path: &std::path::Path, image: &egui::ColorImage) {
         Ok(()) => tracing::info!(path = %path.display(), "screenshot saved"),
         Err(e) => tracing::error!(error = %e, "cannot save screenshot"),
     }
-}
-
-fn open_privacy_settings(pane: &str) {
-    #[cfg(target_os = "macos")]
-    recorder_capture::macos::permissions::open_privacy_settings(pane);
-    #[cfg(not(target_os = "macos"))]
-    let _ = pane;
 }
 
 fn error_dialog(text: &str) {

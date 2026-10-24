@@ -601,27 +601,50 @@ pub fn icon_tile(ui: &mut Ui, icon: Icon, tone: Tone) {
     draw_icon(ui.painter(), icon, rect.center(), fg);
 }
 
-/// A thin level bar: 0 dBFS full, −60 dBFS empty. `None` = idle.
-pub fn meter(ui: &mut Ui, peak: Option<f32>) {
+/// The level to show, as a fraction of the −60…0 dBFS scale. Levels
+/// arrive every 50 ms; this eases towards them every frame, rising quickly
+/// and falling slowly like a VU meter, so the bar and the figure move
+/// smoothly. `None` = idle.
+pub fn smooth_level(ui: &Ui, id_salt: &str, peak: Option<f32>) -> f32 {
+    let target = ((peak.map_or(-120.0, to_db) + 60.0) / 60.0).clamp(0.0, 1.0);
+    let id = egui::Id::new(("level", id_salt));
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+    let shown = ui.data_mut(|d| {
+        let v = d.get_temp_mut_or(id, target);
+        *v = ease_level(*v, target, dt);
+        *v
+    });
+    // Finish falling to zero after the recording stops.
+    if peak.is_none() && shown > 0.001 {
+        ui.ctx().request_repaint();
+    }
+    shown
+}
+
+/// One step of the level easing: rises with a 40 ms time constant, falls
+/// with 250 ms, independent of the frame rate.
+fn ease_level(current: f32, target: f32, dt: f32) -> f32 {
+    let tau = if target > current { 0.04 } else { 0.25 };
+    current + (target - current) * (1.0 - (-dt / tau).exp())
+}
+
+/// A thin level bar; `level` comes from [`smooth_level`].
+pub fn meter(ui: &mut Ui, level: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 3, TRACK);
-    let Some(db) = peak.map(to_db) else {
-        return;
-    };
-    let fraction = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-    if fraction <= 0.0 {
+    if level < 0.005 {
         return;
     }
-    let color = if db > -1.0 {
+    let color = if level > 59.0 / 60.0 {
         RED
-    } else if db > -6.0 {
+    } else if level > 0.9 {
         AMBER
     } else {
         BLUE
     };
     let mut fill = rect;
-    fill.set_width((rect.width() * fraction).max(6.0));
+    fill.set_width((rect.width() * level).max(6.0));
     painter.rect_filled(fill, 3, color);
 }
 
@@ -715,4 +738,28 @@ pub fn modal_frame() -> egui::Frame {
         spread: 0,
         color: Color32::from_rgba_unmultiplied(16, 36, 72, 46),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ease_level;
+
+    fn run(mut v: f32, target: f32, seconds: f32, fps: f32) -> f32 {
+        for _ in 0..(seconds * fps) as usize {
+            v = ease_level(v, target, 1.0 / fps);
+        }
+        v
+    }
+
+    #[test]
+    fn level_rises_fast_falls_slowly_at_any_frame_rate() {
+        // Rising: most of the way within 0.1 s.
+        assert!(run(0.0, 1.0, 0.1, 30.0) > 0.9);
+        // Falling: still visible after 0.1 s, gone after 1.5 s.
+        let falling = run(1.0, 0.0, 0.1, 30.0);
+        assert!(falling > 0.6, "fell to {falling}");
+        assert!(run(1.0, 0.0, 1.5, 30.0) < 0.01);
+        // The same motion at 30 and 60 frames per second.
+        assert!((run(1.0, 0.0, 0.5, 30.0) - run(1.0, 0.0, 0.5, 60.0)).abs() < 0.01);
+    }
 }

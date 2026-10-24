@@ -443,7 +443,7 @@ fn run(
                 states[ch].last_sound = Some(Instant::now());
             }
         }
-        if last_ui.elapsed() >= Duration::from_millis(100) {
+        if last_ui.elapsed() >= Duration::from_millis(50) {
             last_ui = Instant::now();
             let mut st = status.lock().expect("status");
             st.elapsed_ms = engine.session().elapsed_ms();
