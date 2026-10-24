@@ -417,3 +417,117 @@ fn file_size_per_hour_is_within_budget() {
     assert!(mb_per_hour < 16.0, "{mb_per_hour:.1} MB/h");
     std::fs::remove_dir_all(root).ok();
 }
+
+fn speech_a(t: f64) -> f32 {
+    let mut x = (t * 16_000.0)
+        .round()
+        .to_bits()
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 31;
+    let noise = (x as f64 / u64::MAX as f64) * 2.0 - 1.0;
+    let syllables = (2.0 * PI * 3.0 * t).sin().max(0.0);
+    (0.4 * noise * syllables + 0.2 * (2.0 * PI * 220.0 * t).sin() * syllables) as f32
+}
+
+/// Speakers: the microphone hears the system channel 30 ms later at −10 dB.
+fn speaker_echo(t: f64) -> f32 {
+    0.3 * speech_a(t - 0.030)
+}
+
+#[test]
+fn echo_from_speakers_is_removed_when_aec_is_on() {
+    let mut levels = Vec::new();
+    for aec in [false, true] {
+        let root = temp_root(&format!("aec-{aec}"));
+        let mut engine = new_engine(&root, 600);
+        engine.set_aec(aec);
+        let dir = engine.session().dir().to_path_buf();
+        let mut sources = [
+            SimSource {
+                channel: MIC,
+                rate: 48_000,
+                drift: 0.0,
+                block: 480,
+                n: 0,
+                gaps: vec![],
+                signal: speaker_echo,
+            },
+            SimSource {
+                channel: SYSTEM,
+                rate: 48_000,
+                drift: 0.0,
+                block: 480,
+                n: 0,
+                gaps: vec![],
+                signal: speech_a,
+            },
+        ];
+        simulate(&mut engine, &mut sources, 10.0);
+        engine.finish(10_000_000_000).unwrap();
+        let (m, l, _) = decode_session(&dir);
+        assert_eq!(
+            m.devices.aec, "off",
+            "manifest field is set by the app layer"
+        );
+        levels.push(rms_dbfs(&l[16_000 * 4..]));
+        std::fs::remove_dir_all(root).ok();
+    }
+    let reduction = levels[0] - levels[1];
+    println!(
+        "echo level without AEC {:.1} dBFS, with AEC {:.1} dBFS",
+        levels[0], levels[1]
+    );
+    assert!(
+        reduction > 15.0,
+        "AEC reduced echo by only {reduction:.1} dB"
+    );
+}
+
+/// After a sleep the session continues in a new part and the sleep time is
+/// not filled with silence, even if the host clock kept running.
+#[test]
+fn sleep_starts_a_new_part_without_recording_the_gap() {
+    let root = temp_root("sleep");
+    let mut engine = new_engine(&root, 600);
+    let dir = engine.session().dir().to_path_buf();
+    let block = |engine: &mut Engine, t: f64| {
+        let samples: Vec<f32> = (0..480).map(|i| sine300(t + i as f64 / 48_000.0)).collect();
+        engine.ingest(MIC, (t * 1e9) as u64, 48_000, &samples);
+    };
+    let mut t = 0.0;
+    while t < 3.0 {
+        block(&mut engine, t);
+        t += 0.01;
+        engine.tick((t * 1e9) as u64).unwrap();
+    }
+    // 60 s of sleep: the host clock jumps, nothing is captured meanwhile.
+    let before = t;
+    t += 60.0;
+    engine
+        .resume_after_pause((before * 1e9) as u64, (t * 1e9) as u64, 60_000)
+        .unwrap();
+    let resume = t;
+    while t < resume + 2.0 {
+        block(&mut engine, t);
+        t += 0.01;
+        engine.tick((t * 1e9) as u64).unwrap();
+    }
+    let m = engine.finish((t * 1e9) as u64).unwrap();
+    assert_eq!(m.parts.len(), 2);
+    let total: u64 = m.parts.iter().map(|p| p.duration_ms).sum();
+    assert!(
+        total < 6_000,
+        "recorded {total} ms, the sleep must not be recorded"
+    );
+    assert!(m.events.iter().any(|e| e.kind == "sleep"));
+    let gap = m.parts[1].started_at_utc.unwrap() - m.parts[0].started_at_utc.unwrap();
+    assert!(
+        gap.num_seconds() >= 62,
+        "wall-clock start of part 2 is {gap:?} after part 1"
+    );
+    let (_, l, _) = decode_session(&dir);
+    // Audio right after the resume point is the tone, not silence.
+    let p2 = (m.parts[1].start_offset_ms * 16) as usize;
+    assert!(rms_dbfs(&l[p2 + 8_000..p2 + 16_000]) > -15.0);
+    std::fs::remove_dir_all(root).ok();
+}

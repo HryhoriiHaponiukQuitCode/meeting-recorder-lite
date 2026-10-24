@@ -5,6 +5,7 @@
 //! Nothing in this crate touches audio devices, so all of it is unit-tested
 //! with synthetic sources and simulated clocks.
 
+pub mod aec;
 pub mod decode;
 pub mod engine;
 pub mod manifest;

@@ -13,7 +13,7 @@ use crate::manifest::{Manifest, PartInfo, PartStatus, Status};
 use crate::ogg_scan;
 use crate::session::LOCK_FILE;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Recovered {
     pub dir: PathBuf,
     pub parts: usize,
@@ -109,6 +109,7 @@ pub fn recover_session(dir: &Path) -> io::Result<Option<Recovered>> {
             last_mtime = Some(m);
         }
         parts.push(PartInfo {
+            started_at_utc: known.as_ref().and_then(|p| p.started_at_utc),
             file,
             start_offset_ms: start,
             duration_ms,

@@ -4,8 +4,11 @@
 //! changes. Recording never stops because of a device.
 
 pub mod clock;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod mic;
 pub mod output;
+pub mod power;
 pub mod ring;
 #[cfg(windows)]
 pub mod wasapi_loopback;

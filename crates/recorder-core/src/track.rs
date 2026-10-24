@@ -298,6 +298,22 @@ impl Track {
         self.fifo.drain(..consumed);
     }
 
+    /// Copies timeline frames `[pos, pos + dst.len())` into `dst` without
+    /// consuming them (zeros where nothing was delivered yet).
+    pub fn peek(&self, pos: u64, dst: &mut [f32]) {
+        for (i, d) in dst.iter_mut().enumerate() {
+            let t = pos + i as u64;
+            *d = if t >= self.out_pos {
+                self.out
+                    .get((t - self.out_pos) as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+        }
+    }
+
     /// Copies timeline frames `[pos, pos + dst.len())` into `dst` and forgets
     /// everything before `pos + dst.len()`. Frames the source did not deliver
     /// are zero. `pos` must never decrease between calls.

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the generated Info.plist by cargo-packager. -->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Meeting Recorder записує ваш голос у лівий канал файлу розмови.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Meeting Recorder записує звук співрозмовників (системний звук) у правий канал файлу розмови.</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.productivity</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Meeting Recorder contributors. Користувач відповідає за згоду учасників на запис.</string>
+</dict>
+</plist>

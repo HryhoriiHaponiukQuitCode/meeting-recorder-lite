@@ -71,7 +71,11 @@ pub struct Devices {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartInfo {
     pub file: String,
+    /// Position on the recording timeline (sleep periods are not counted).
     pub start_offset_ms: u64,
+    /// Wall-clock start, so parts recorded after a sleep can be placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_utc: Option<DateTime<Utc>>,
     pub duration_ms: u64,
     pub status: PartStatus,
 }

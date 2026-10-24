@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/recorder-core", "crates/recorder-capture", "crates/recorder-cli"]
+members = ["crates/recorder-core", "crates/recorder-capture", "crates/recorder-app", "crates/recorder-cli", "crates/recorder-tray"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 recorder-core = { path = "crates/recorder-core" }
 recorder-capture = { path = "crates/recorder-capture" }
+recorder-app = { path = "crates/recorder-app" }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1.44"

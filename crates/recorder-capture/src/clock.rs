@@ -17,7 +17,7 @@ pub fn host_now_ns() -> u64 {
 }
 
 #[cfg(target_os = "macos")]
-pub fn host_now_ns() -> u64 {
+mod mach {
     #[repr(C)]
     struct TimebaseInfo {
         numer: u32,
@@ -27,13 +27,31 @@ pub fn host_now_ns() -> u64 {
         fn mach_absolute_time() -> u64;
         fn mach_timebase_info(info: *mut TimebaseInfo) -> i32;
     }
-    let mut tb = TimebaseInfo { numer: 0, denom: 0 };
-    // SAFETY: plain libSystem calls writing into a local struct.
-    let ticks = unsafe {
-        mach_timebase_info(&mut tb);
-        mach_absolute_time()
-    };
-    (ticks as u128 * tb.numer as u128 / tb.denom.max(1) as u128) as u64
+
+    pub fn now_ticks() -> u64 {
+        // SAFETY: plain libSystem call.
+        unsafe { mach_absolute_time() }
+    }
+
+    /// Converts `mach_absolute_time` ticks (Core Audio `mHostTime`) to nanoseconds.
+    pub fn ticks_to_ns(ticks: u64) -> u64 {
+        static TB: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+        let (numer, denom) = *TB.get_or_init(|| {
+            let mut tb = TimebaseInfo { numer: 1, denom: 1 };
+            // SAFETY: writes into a local struct.
+            unsafe { mach_timebase_info(&mut tb) };
+            (tb.numer, tb.denom.max(1))
+        });
+        (ticks as u128 * numer as u128 / denom as u128) as u64
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use mach::ticks_to_ns;
+
+#[cfg(target_os = "macos")]
+pub fn host_now_ns() -> u64 {
+    mach::ticks_to_ns(mach::now_ticks())
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]

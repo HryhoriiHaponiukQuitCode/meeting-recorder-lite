@@ -5,10 +5,11 @@
 
 use std::io;
 
+use crate::aec::{self, EchoCanceller};
 use crate::manifest::Manifest;
 use crate::session::SessionWriter;
 use crate::track::{Track, TrackStats};
-use crate::{CHANNELS, FRAME_SAMPLES, ns_to_frames};
+use crate::{CHANNELS, FRAME_SAMPLES, MIC, SYSTEM, ns_to_frames};
 
 /// Default distance between "now" and the newest committed frame. Must exceed
 /// the longest capture callback period (Bluetooth, ScreenCaptureKit) so audio
@@ -22,7 +23,9 @@ pub struct Engine {
     latency_frames: u64,
     session: SessionWriter,
     mono: [Vec<f32>; CHANNELS],
+    reference: Vec<f32>,
     interleaved: Vec<f32>,
+    aec: Option<EchoCanceller>,
 }
 
 impl Engine {
@@ -35,8 +38,48 @@ impl Engine {
             latency_frames: latency_ms * crate::SAMPLE_RATE as u64 / 1000,
             session,
             mono: [vec![0.0; FRAME_SAMPLES], vec![0.0; FRAME_SAMPLES]],
+            reference: vec![0.0; FRAME_SAMPLES],
             interleaved: vec![0.0; FRAME_SAMPLES * CHANNELS],
+            aec: None,
         }
+    }
+
+    /// Turns echo cancellation of the microphone channel on or off.
+    pub fn set_aec(&mut self, enabled: bool) {
+        match (enabled, self.aec.is_some()) {
+            (true, false) => self.aec = Some(EchoCanceller::new()),
+            (false, true) => self.aec = None,
+            _ => {}
+        }
+    }
+
+    pub fn aec_enabled(&self) -> bool {
+        self.aec.is_some()
+    }
+
+    /// Call after the system slept for `paused_ms`. Commits what was captured
+    /// before `before_ns` (the last host time seen before the sleep), closes
+    /// the part and re-anchors the timeline at `now_ns`, so the sleep is not
+    /// recorded as silence even on hosts whose clock keeps running.
+    pub fn resume_after_pause(
+        &mut self,
+        before_ns: u64,
+        now_ns: u64,
+        paused_ms: u64,
+    ) -> io::Result<()> {
+        let before = self.pos(before_ns);
+        let captured = self.tracks.iter().map(Track::end_pos).max().unwrap_or(0) as f64;
+        let frame = FRAME_SAMPLES as f64;
+        self.commit_until((captured.min(before) / frame).ceil() * frame)?;
+        self.session.pause(paused_ms)?;
+        self.tracks = [Track::new(), Track::new()];
+        if self.aec.is_some() {
+            self.aec = Some(EchoCanceller::new());
+        }
+        let ahead_ns = (self.committed + self.latency_frames) as u128 * 1_000_000_000
+            / crate::SAMPLE_RATE as u128;
+        self.t0_ns = now_ns.saturating_sub(ahead_ns as u64);
+        Ok(())
     }
 
     pub fn session(&self) -> &SessionWriter {
@@ -74,8 +117,15 @@ impl Engine {
 
     fn commit_until(&mut self, until: f64) -> io::Result<()> {
         while (self.committed + FRAME_SAMPLES as u64) as f64 <= until {
+            if self.aec.is_some() {
+                self.tracks[SYSTEM]
+                    .peek(self.committed + aec::LOOKAHEAD as u64, &mut self.reference);
+            }
             for (track, mono) in self.tracks.iter_mut().zip(self.mono.iter_mut()) {
                 track.take(self.committed, mono);
+            }
+            if let Some(aec) = self.aec.as_mut() {
+                aec.process(&mut self.mono[MIC], &self.reference);
             }
             for (i, frame) in self
                 .interleaved

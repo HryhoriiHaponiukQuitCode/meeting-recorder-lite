@@ -1,0 +1,65 @@
+//! User settings (`settings.json` in the config directory). Missing or
+//! unreadable files fall back to defaults; unknown fields are ignored.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::recorder::AecMode;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// The consent reminder was dismissed with "don't show again".
+    pub consent_reminder_dismissed: bool,
+    pub part_minutes: u32,
+    pub bitrate_kbps: u32,
+    pub aec: AecMode,
+    /// `None` = Documents/Meeting Recorder/recordings.
+    pub recordings_dir: Option<PathBuf>,
+    /// Microphone name substring; `None` = system default.
+    pub mic_device: Option<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            consent_reminder_dismissed: false,
+            part_minutes: 10,
+            bitrate_kbps: 32,
+            aec: AecMode::Auto,
+            recordings_dir: None,
+            mic_device: None,
+        }
+    }
+}
+
+impl Settings {
+    fn path() -> PathBuf {
+        crate::paths::config_dir().join("settings.json")
+    }
+
+    pub fn load() -> Self {
+        std::fs::read(Self::path())
+            .ok()
+            .and_then(|d| serde_json::from_slice(&d).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?,
+        )
+    }
+
+    pub fn recordings_dir(&self) -> PathBuf {
+        self.recordings_dir
+            .clone()
+            .unwrap_or_else(crate::paths::default_recordings_dir)
+    }
+}

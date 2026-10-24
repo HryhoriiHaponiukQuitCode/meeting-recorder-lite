@@ -5,12 +5,19 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write # the release job attaches installers to a GitHub release
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-latest
+            name: macos-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -18,14 +25,17 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-packager@0.11.8
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --release -- -D warnings
       - name: Tests
         run: cargo test --workspace --release
-      - name: Build recorder
-        run: cargo build --release -p recorder-cli
+      - name: Build
+        run: cargo build --release -p recorder-cli -p recorder-tray
       - name: DLL dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -33,15 +43,58 @@ jobs:
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object FullName -like '*Hostx64\x64*' | Select-Object -First 1
           & $dumpbin.FullName /dependents target\release\recorder.exe
-      - name: Upload Windows binary
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+          & $dumpbin.FullName /dependents target\release\meeting-recorder.exe
+      - name: Package
+        shell: bash
+        env:
+          # Optional repository secrets. Without them the macOS app gets an
+          # ad-hoc signature and the Windows installer is unsigned.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # cargo-packager treats an empty variable as "set", so drop empty ones.
+          for v in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            sed -i.bak "s|^signing-identity = \"-\"|signing-identity = \"$APPLE_SIGNING_IDENTITY\"|" crates/recorder-tray/Cargo.toml
+          fi
+          cd crates/recorder-tray && cargo packager --release
+      - name: Installer size (limit 15 MB)
+        shell: bash
+        run: |
+          ls -la dist
+          for f in dist/*.dmg dist/*-setup.exe; do
+            [ -f "$f" ] || continue
+            size=$(wc -c < "$f")
+            echo "$f: $size bytes"
+            [ "$size" -le 15728640 ] || { echo "::error::$f is larger than 15 MB"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
         with:
-          name: recorder-windows-x64
-          path: target/release/recorder.exe
-      - name: Upload macOS binary
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+          name: meeting-recorder-${{ matrix.name }}
+          path: |
+            dist/*.dmg
+            dist/*-setup.exe
+            target/release/recorder
+            target/release/recorder.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          name: recorder-macos-arm64
-          path: target/release/recorder
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            artifacts/dist/*.dmg
+            artifacts/dist/*-setup.exe

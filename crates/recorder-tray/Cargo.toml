@@ -1,0 +1,53 @@
+[package]
+name = "recorder-tray"
+description = "Meeting Recorder: records the microphone and system audio of online calls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "meeting-recorder"
+path = "src/main.rs"
+
+[dependencies]
+recorder-app.workspace = true
+recorder-capture.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tray-icon = "0.26.1"
+tao = "0.37.2"
+rfd = { version = "0.17.2", default-features = false }
+
+# `cargo packager --release` (run from this folder or with -p recorder-tray):
+# macOS .app + .dmg, Windows NSIS installer. Paths are relative to this file.
+[package.metadata.packager]
+product-name = "Meeting Recorder"
+identifier = "io.github.meeting-recorder-lite"
+publisher = "Meeting Recorder contributors"
+copyright = "Meeting Recorder contributors"
+category = "Productivity"
+before-packaging-command = "cargo build --release -p recorder-tray"
+out-dir = "../../dist"
+binaries = [{ path = "meeting-recorder", main = true }]
+icons = [
+  "../../packaging/icons/32x32.png",
+  "../../packaging/icons/128x128.png",
+  "../../packaging/icons/256x256.png",
+  "../../packaging/icons/512x512.png",
+  "../../packaging/icons/icon.ico",
+]
+resources = ["../../THIRD_PARTY_NOTICES.md", "../../README.md"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "13.0"
+background-app = true
+# "-" = ad-hoc signature (local builds, CI artifacts). Release builds replace
+# it with a Developer ID identity; see .github/workflows/release.yml.
+signing-identity = "-"
+info-plist-path = "../../packaging/macos/Info.plist"
+entitlements = "../../packaging/macos/entitlements.plist"
+
+[package.metadata.packager.nsis]
+installer-icon = "../../packaging/icons/icon.ico"
+installer-mode = "currentUser"

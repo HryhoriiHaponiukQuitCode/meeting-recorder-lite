@@ -43,6 +43,8 @@ pub struct SessionWriter {
     frames_per_part: u64,
     frames_total: u64,
     part_start_frame: u64,
+    /// Time the session spent paused (system sleep), not on the timeline.
+    paused_ms: u64,
     lock: Option<File>,
 }
 
@@ -71,6 +73,7 @@ impl SessionWriter {
             part: None,
             frames_total: 0,
             part_start_frame: 0,
+            paused_ms: 0,
             lock: Some(lock),
         })
     }
@@ -126,7 +129,10 @@ impl SessionWriter {
         )?;
         self.part = Some(part);
         self.part_start_frame = self.frames_total;
+        let wall_offset =
+            chrono::Duration::milliseconds((self.frames_total * 20 + self.paused_ms) as i64);
         self.manifest.parts.push(PartInfo {
+            started_at_utc: Some(self.manifest.started_at_utc + wall_offset),
             file,
             start_offset_ms: self.frames_total * 20,
             duration_ms: 0,
@@ -179,9 +185,12 @@ impl SessionWriter {
         Ok(())
     }
 
-    /// Closes the current part without ending the session (e.g. before sleep).
-    pub fn break_part(&mut self) -> io::Result<()> {
-        self.close_part(None)
+    /// Closes the current part after a pause of `paused_ms` (system sleep).
+    /// The next frame starts a new part; the pause is recorded as an event.
+    pub fn pause(&mut self, paused_ms: u64) -> io::Result<()> {
+        self.close_part(None)?;
+        self.paused_ms += paused_ms;
+        self.event("sleep", serde_json::json!({ "duration_ms": paused_ms }))
     }
 
     pub fn finish(mut self) -> io::Result<Manifest> {
