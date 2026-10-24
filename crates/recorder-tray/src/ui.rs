@@ -298,6 +298,7 @@ pub fn pill(ui: &mut Ui, text: &str, tone: Tone, dot: bool) -> Response {
 pub enum Icon {
     Play,
     Pause,
+    Wave,
     Stop,
     Arrow,
     Back,
@@ -326,6 +327,11 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
                 color,
                 Stroke::new(1.0_f32, color),
             ));
+        }
+        Icon::Wave => {
+            for (dx, h) in [(-6.0, 4.0), (-2.0, 10.0), (2.0, 14.0), (6.0, 7.0)] {
+                line(vec2(dx, -h / 2.0), vec2(dx, h / 2.0));
+            }
         }
         Icon::Pause => {
             for dx in [-3.0, 3.0] {
@@ -421,6 +427,25 @@ fn arc(painter: &egui::Painter, c: Pos2, r: f32, from: f32, to: f32, stroke: Str
     painter.add(Shape::line(points, stroke));
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Size {
+    /// The full width of the card.
+    Full,
+    Regular,
+    /// For card headers.
+    Small,
+}
+
+impl Size {
+    fn of(full_width: bool) -> Self {
+        if full_width {
+            Size::Full
+        } else {
+            Size::Regular
+        }
+    }
+}
+
 struct ButtonLook {
     fill: Color32,
     hover: Color32,
@@ -436,19 +461,20 @@ fn icon_button_with_text(
     leading: Option<Icon>,
     trailing: Option<Icon>,
     look: ButtonLook,
-    full_width: bool,
+    size: Size,
 ) -> Response {
     const ICON: f32 = 14.0;
-    const GAP: f32 = 8.0;
-    let galley =
-        ui.painter()
-            .layout_no_wrap(text.to_owned(), FontId::new(14.0, medium()), look.text);
+    let gap = if size == Size::Small { 6.0 } else { 8.0 };
+    let font = FontId::new(if size == Size::Small { 13.0 } else { 14.0 }, medium());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, look.text);
     let icons = [leading, trailing].iter().flatten().count() as f32;
-    let content = galley.size().x + icons * (ICON + GAP);
-    let size = if full_width {
-        vec2(ui.available_width(), 44.0)
-    } else {
-        vec2(content + 32.0, 36.0)
+    let content = galley.size().x + icons * (ICON + gap);
+    let size = match size {
+        Size::Full => vec2(ui.available_width(), 44.0),
+        Size::Regular => vec2(content + 32.0, 36.0),
+        Size::Small => vec2(content + 24.0, 30.0),
     };
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let hovered = response.hovered();
@@ -473,11 +499,11 @@ fn icon_button_with_text(
     let mut x = rect.center().x - content / 2.0;
     if let Some(icon) = leading {
         draw_icon(painter, icon, pos2(x + ICON / 2.0, cy), look.icon);
-        x += ICON + GAP;
+        x += ICON + gap;
     }
     let text_w = galley.size().x;
     painter.galley(pos2(x, cy - galley.size().y / 2.0), galley, look.text);
-    x += text_w + GAP;
+    x += text_w + gap;
     if let Some(icon) = trailing {
         draw_icon(painter, icon, pos2(x + ICON / 2.0, cy), look.icon);
     }
@@ -507,7 +533,7 @@ pub fn primary(
         text: Color32::WHITE,
         icon: Color32::WHITE,
     };
-    icon_button_with_text(ui, text, leading, trailing, look, full_width)
+    icon_button_with_text(ui, text, leading, trailing, look, Size::of(full_width))
 }
 
 /// The white outlined action, with an optional coloured icon.
@@ -524,7 +550,26 @@ pub fn outline(
         text: INK,
         icon: icon.map_or(INK, |(_, c)| c),
     };
-    icon_button_with_text(ui, text, icon.map(|(i, _)| i), None, look, full_width)
+    icon_button_with_text(
+        ui,
+        text,
+        icon.map(|(i, _)| i),
+        None,
+        look,
+        Size::of(full_width),
+    )
+}
+
+/// A compact outlined action for card headers.
+pub fn outline_small(ui: &mut Ui, text: &str, icon: Option<(Icon, Color32)>) -> Response {
+    let look = ButtonLook {
+        fill: CARD,
+        hover: HOVER,
+        border: Some((BORDER, BORDER_HOVER)),
+        text: INK,
+        icon: icon.map_or(INK, |(_, c)| c),
+    };
+    icon_button_with_text(ui, text, icon.map(|(i, _)| i), None, look, Size::Small)
 }
 
 /// A square outlined icon button (settings, back).

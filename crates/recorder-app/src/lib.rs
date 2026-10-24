@@ -3,12 +3,14 @@
 //! status and user-facing notices, and owns paths, settings and logging.
 
 pub mod logging;
+mod monitor;
 pub mod paths;
 pub mod permissions;
 pub mod procstat;
 mod recorder;
 pub mod settings;
 
+pub use monitor::{Monitor, MonitorStatus};
 pub use recorder::{AecMode, Notice, Recorder, RecorderOptions, Status, SystemOption};
 pub use recorder_capture::Source;
 pub use recorder_core::recovery::{Recovered, recover_all};

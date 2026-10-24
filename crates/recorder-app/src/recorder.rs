@@ -204,7 +204,7 @@ fn os_info() -> OsInfo {
     }
 }
 
-fn start_system(
+pub(crate) fn start_system(
     opt: &SystemOption,
     producer: SharedProducer,
     events: Sender<CaptureEvent>,

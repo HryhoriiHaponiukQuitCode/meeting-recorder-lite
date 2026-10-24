@@ -19,9 +19,15 @@ use eframe::egui::{self, Align, FontId, Layout, RichText, TextureHandle, Viewpor
 use recorder_app::permissions::{self, Access, Permission};
 use recorder_app::settings::Settings;
 use recorder_app::{
-    APP_NAME, AecMode, CONSENT_REMINDER, Notice, Recorder, RecorderOptions, Status, SystemOption,
-    logging, paths,
+    APP_NAME, AecMode, CONSENT_REMINDER, Monitor, Notice, Recorder, RecorderOptions, Status,
+    SystemOption, logging, paths,
 };
+
+/// How long the channel check listens.
+const CHECK_SECONDS: u64 = 10;
+/// A channel "works" when its peak reached −45 dBFS during the check:
+/// above room noise, below normal speech or playback.
+const CHECK_WORKS: f32 = 0.0056;
 
 /// How often the window refreshes while recording: often enough for smooth
 /// level bars, and once a second when minimized (the title timer only).
@@ -44,6 +50,14 @@ struct Message {
     problem: bool,
 }
 
+/// Result of the channel check for one channel.
+#[derive(Clone)]
+enum Check {
+    Works,
+    Silent,
+    Failed(String),
+}
+
 struct LastRecording {
     dir: PathBuf,
     started: DateTime<Utc>,
@@ -56,6 +70,8 @@ struct DevOptions {
     smoke_test: Option<u64>,
     /// `--smoke-pause 2:5`: pause the smoke test at 2 s, resume at 5 s.
     smoke_pause: Option<(f32, f32)>,
+    /// `--check`: start the channel check at launch.
+    check: bool,
     screenshot: Option<PathBuf>,
     screenshot_at: Option<f32>,
     view: Option<View>,
@@ -79,6 +95,9 @@ struct App {
     smoke_until: Option<Instant>,
     smoke_pause: Option<(f32, f32)>,
     screenshot: Option<(PathBuf, f32)>,
+    /// The running channel check and when it started.
+    check: Option<(Monitor, Instant)>,
+    check_result: Option<[Check; 2]>,
     /// Privacy permissions and when they were last checked.
     permissions: Vec<(Permission, Access)>,
     permissions_checked: Instant,
@@ -111,6 +130,8 @@ impl App {
             started: Instant::now(),
             smoke_until: None,
             smoke_pause: dev.smoke_pause,
+            check: None,
+            check_result: None,
             screenshot: dev
                 .screenshot
                 .map(|p| (p, dev.screenshot_at.unwrap_or(2.0))),
@@ -129,6 +150,9 @@ impl App {
                 .map(|(p, _)| *p)
                 .collect();
             app.ask(&cc.egui_ctx, missing);
+        }
+        if dev.check {
+            app.start_check();
         }
         if let Some(seconds) = dev.smoke_test {
             // Checks permissions and capture in the real bundle; skips the
@@ -234,7 +258,34 @@ impl App {
         }
     }
 
+    fn start_check(&mut self) {
+        if self.recorder.is_none() {
+            self.check_result = None;
+            self.check = Some((
+                Monitor::start(self.settings.mic_device.clone()),
+                Instant::now(),
+            ));
+        }
+    }
+
+    /// Ends the channel check and keeps its verdict for each channel.
+    fn finish_check(&mut self) {
+        let Some((monitor, _)) = self.check.take() else {
+            return;
+        };
+        let st = monitor.status();
+        drop(monitor);
+        self.check_result = Some(std::array::from_fn(|ch| match &st.failed[ch] {
+            Some(e) if st.max[ch] < CHECK_WORKS => Check::Failed(e.clone()),
+            _ if st.max[ch] >= CHECK_WORKS => Check::Works,
+            _ => Check::Silent,
+        }));
+    }
+
     fn begin(&mut self) {
+        // The check holds the devices; a recording opens them itself.
+        self.check = None;
+        self.check_result = None;
         let opts = RecorderOptions {
             root: self.settings.recordings_dir(),
             part_seconds: self.settings.part_minutes.max(1) * 60,
@@ -356,6 +407,13 @@ impl App {
             } else if t >= pause_at && !paused {
                 self.set_paused(true);
             }
+        }
+        if self
+            .check
+            .as_ref()
+            .is_some_and(|(_, t)| t.elapsed() >= Duration::from_secs(CHECK_SECONDS))
+        {
+            self.finish_check();
         }
         if self.smoke_until.is_some_and(|t| Instant::now() >= t) {
             self.smoke_until = None;
@@ -479,10 +537,33 @@ impl App {
         });
     }
 
-    fn channels(&self, ui: &mut egui::Ui) {
-        let levels = self.status.as_ref().map(|s| s.levels);
+    fn channels(&mut self, ui: &mut egui::Ui) {
+        // Live levels come from the recording or, before one, from the check.
+        let levels = match (&self.status, &self.check) {
+            (Some(st), _) => Some(st.levels),
+            (None, Some((m, _))) => Some(m.status().levels),
+            _ => None,
+        };
+        let left = self
+            .check
+            .as_ref()
+            .map(|(_, t)| CHECK_SECONDS.saturating_sub(t.elapsed().as_secs()));
+        let recording = self.recorder.is_some();
+        let (mut start, mut stop) = (false, false);
         ui::card(ui, |ui| {
-            ui::card_header(ui, "Channels", |_| {});
+            ui::card_header(ui, "Channels", |ui| {
+                if recording {
+                    return;
+                }
+                if left.is_some() {
+                    stop = ui::outline_small(ui, "Stop test", Some((ui::Icon::Stop, ui::RED)))
+                        .clicked();
+                } else {
+                    start = ui::outline_small(ui, "Test", Some((ui::Icon::Wave, ui::BLUE)))
+                        .on_hover_text("Check that both channels hear sound")
+                        .clicked();
+                }
+            });
             ui.add_space(ui::S1);
             let rows = [
                 (ui::Icon::Mic, "You", "microphone", levels.map(|l| l[0])),
@@ -497,6 +578,7 @@ impl App {
                 if i > 0 {
                     ui.add_space(ui::S2);
                 }
+                let verdict = self.check_result.as_ref().map(|r| r[i].clone());
                 ui.horizontal(|ui| {
                     ui::icon_tile(ui, icon, ui::Tone::Blue);
                     let level = ui::smooth_level(ui, name, peak);
@@ -506,21 +588,69 @@ impl App {
                             ui.label(RichText::new(name).font(FontId::new(14.0, ui::medium())));
                             ui.label(ui::muted(source));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let text = match peak {
-                                    None => "—".to_string(),
-                                    Some(_) if level < 0.005 => "silent".to_string(),
-                                    // A real minus sign, not a hyphen.
-                                    Some(_) => format!("{:.0} dB", level * 60.0 - 60.0)
-                                        .replace('-', "\u{2212}"),
-                                };
-                                ui.label(ui::muted(text));
+                                match (peak, verdict) {
+                                    (None, Some(Check::Works)) => {
+                                        ui::pill(ui, "Works", ui::Tone::Green, false);
+                                    }
+                                    (None, Some(Check::Silent)) => {
+                                        ui::pill(ui, "No sound", ui::Tone::Amber, false);
+                                    }
+                                    (None, Some(Check::Failed(e))) => {
+                                        ui::pill(ui, "Unavailable", ui::Tone::Red, false)
+                                            .on_hover_text(e);
+                                    }
+                                    (None, None) => {
+                                        ui.label(ui::muted("—"));
+                                    }
+                                    (Some(_), _) if level < 0.005 => {
+                                        ui.label(ui::muted("silent"));
+                                    }
+                                    (Some(_), _) => {
+                                        // A real minus sign, not a hyphen.
+                                        let db = format!("{:.0} dB", level * 60.0 - 60.0)
+                                            .replace('-', "\u{2212}");
+                                        ui.label(ui::muted(db));
+                                    }
+                                }
                             });
                         });
                         ui::meter(ui, level);
                     });
                 });
             }
+            if let Some(left) = left {
+                ui.add_space(ui::S2);
+                ui.label(ui::muted(format!(
+                    "Say something and play any sound, such as a video, so both channels \
+                     hear it. {left} s left."
+                )));
+            } else if let Some(result) = &self.check_result {
+                let hint = match result {
+                    [Check::Works, Check::Works] => None,
+                    [Check::Works, Check::Silent] => Some(
+                        "No sound from others. Play something during the test and check \
+                         the output device.",
+                    ),
+                    [Check::Silent, Check::Works] => {
+                        Some("No sound from your microphone. Check that it is not muted.")
+                    }
+                    [Check::Silent, Check::Silent] => Some(
+                        "No sound on either channel. Speak and play something during the test.",
+                    ),
+                    _ => Some("A channel could not be opened. Check the permissions above."),
+                };
+                if let Some(hint) = hint {
+                    ui.add_space(ui::S2);
+                    ui.label(ui::muted(hint));
+                }
+            }
         });
+        if start {
+            self.start_check();
+        }
+        if stop {
+            self.finish_check();
+        }
     }
 
     fn message(&mut self, ui: &mut egui::Ui) {
@@ -827,7 +957,11 @@ impl eframe::App for App {
         self.consent_modal(ctx);
         self.close_modal(ctx);
 
-        if self.recorder.is_some() || self.smoke_until.is_some() || self.screenshot.is_some() {
+        if self.recorder.is_some()
+            || self.check.is_some()
+            || self.smoke_until.is_some()
+            || self.screenshot.is_some()
+        {
             let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
             ctx.request_repaint_after(if minimized {
                 REFRESH_MINIMIZED
@@ -954,6 +1088,7 @@ fn dev_options() -> DevOptions {
     };
     DevOptions {
         smoke_test: value("--smoke-test").and_then(|v| v.parse().ok()),
+        check: args.iter().any(|a| a == "--check"),
         smoke_pause: value("--smoke-pause").and_then(|v| {
             let (a, b) = v.split_once(':')?;
             Some((a.parse().ok()?, b.parse().ok()?))
