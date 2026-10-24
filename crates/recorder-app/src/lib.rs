@@ -4,6 +4,7 @@
 
 pub mod logging;
 pub mod paths;
+pub mod permissions;
 pub mod procstat;
 mod recorder;
 pub mod settings;

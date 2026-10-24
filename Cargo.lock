@@ -2432,6 +2432,7 @@ name = "recorder-tray"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "eframe",
  "png",
  "recorder-app",

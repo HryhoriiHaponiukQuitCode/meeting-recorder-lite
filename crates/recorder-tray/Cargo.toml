@@ -18,6 +18,7 @@ tracing.workspace = true
 eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts"] }
 rfd = { version = "0.17.2", default-features = false }
 png = "0.18.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 # `cargo packager --release` (run from this folder or with -p recorder-tray):
 # macOS .app + .dmg, Windows NSIS installer. Paths are relative to this file.

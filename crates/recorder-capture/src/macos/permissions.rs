@@ -35,10 +35,13 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
-/// Microphone permission; asks the user (and waits up to two minutes) when
-/// it has not been decided yet.
-pub fn ensure_microphone() -> Access {
-    let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+fn av_capture_device() -> Option<&'static AnyClass> {
+    AnyClass::get(c"AVCaptureDevice")
+}
+
+/// Microphone permission without asking.
+pub fn microphone_status() -> Access {
+    let Some(cls) = av_capture_device() else {
         return Access::Unknown;
     };
     let media = NSString::from_str("soun"); // AVMediaTypeAudio
@@ -47,21 +50,36 @@ pub fn ensure_microphone() -> Access {
     match status {
         3 => Access::Granted,
         1 | 2 => Access::Denied,
-        _ => {
-            let (tx, rx) = mpsc::channel();
-            let block = RcBlock::new(move |granted: Bool| {
-                let _ = tx.send(granted.as_bool());
-            });
-            // SAFETY: documented class method; the block is copied by the callee.
-            let _: () = unsafe {
-                msg_send![cls, requestAccessForMediaType: &*media, completionHandler: &*block]
-            };
-            match rx.recv_timeout(Duration::from_secs(120)) {
-                Ok(true) => Access::Granted,
-                Ok(false) => Access::Denied,
-                Err(_) => Access::Unknown,
-            }
-        }
+        _ => Access::Unknown,
+    }
+}
+
+/// Shows the system microphone prompt and waits (up to two minutes) for the
+/// answer. When the user has already decided, returns that decision at once.
+pub fn request_microphone() -> Access {
+    let Some(cls) = av_capture_device() else {
+        return Access::Unknown;
+    };
+    let media = NSString::from_str("soun");
+    let (tx, rx) = mpsc::channel();
+    let block = RcBlock::new(move |granted: Bool| {
+        let _ = tx.send(granted.as_bool());
+    });
+    // SAFETY: documented class method; the block is copied by the callee.
+    let _: () =
+        unsafe { msg_send![cls, requestAccessForMediaType: &*media, completionHandler: &*block] };
+    match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(true) => Access::Granted,
+        Ok(false) => Access::Denied,
+        Err(_) => Access::Unknown,
+    }
+}
+
+/// Microphone permission; asks the user when it has not been decided yet.
+pub fn ensure_microphone() -> Access {
+    match microphone_status() {
+        Access::Unknown => request_microphone(),
+        decided => decided,
     }
 }
 
@@ -117,6 +135,16 @@ pub fn request_system_audio() -> Access {
         Ok(true) => Access::Granted,
         Ok(false) => Access::Denied,
         Err(_) => Access::Unknown,
+    }
+}
+
+/// Screen-recording permission (ScreenCaptureKit) without asking.
+pub fn screen_capture_status() -> Access {
+    // SAFETY: plain CoreGraphics call (macOS 10.15+).
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        Access::Granted
+    } else {
+        Access::Unknown
     }
 }
 
