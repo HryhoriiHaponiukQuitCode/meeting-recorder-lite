@@ -296,7 +296,7 @@ pub fn pill(ui: &mut Ui, text: &str, tone: Tone, dot: bool) -> Response {
 
 #[derive(Clone, Copy)]
 pub enum Icon {
-    Record,
+    Play,
     Pause,
     Stop,
     Arrow,
@@ -316,8 +316,16 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
     let stroke = Stroke::new(1.7_f32, color);
     let line = |a: Vec2, b: Vec2| painter.line_segment([c + a, c + b], stroke);
     match icon {
-        Icon::Record => {
-            painter.circle_filled(c, 5.5, color);
+        Icon::Play => {
+            painter.add(Shape::convex_polygon(
+                vec![
+                    c + vec2(-3.5, -6.0),
+                    c + vec2(6.0, 0.0),
+                    c + vec2(-3.5, 6.0),
+                ],
+                color,
+                Stroke::new(1.0_f32, color),
+            ));
         }
         Icon::Pause => {
             for dx in [-3.0, 3.0] {

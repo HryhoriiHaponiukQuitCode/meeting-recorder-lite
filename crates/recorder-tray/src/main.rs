@@ -455,7 +455,7 @@ impl App {
             );
             ui.add_space(ui::S3);
             let Some(s) = &st else {
-                if ui::primary(ui, "Почати запис", Some(ui::Icon::Record), None, true).clicked()
+                if ui::primary(ui, "Почати запис", Some(ui::Icon::Mic), None, true).clicked()
                 {
                     self.start();
                 }
@@ -465,13 +465,7 @@ impl App {
             let (mut toggle, mut stop) = (false, false);
             ui.columns(2, |cols| {
                 toggle = if paused {
-                    ui::primary(
-                        &mut cols[0],
-                        "Продовжити",
-                        Some(ui::Icon::Record),
-                        None,
-                        true,
-                    )
+                    ui::primary(&mut cols[0], "Продовжити", Some(ui::Icon::Play), None, true)
                 } else {
                     ui::outline(
                         &mut cols[0],
@@ -760,8 +754,7 @@ impl App {
                 });
                 ui.add_space(ui::S4);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui::primary(ui, "Почати запис", Some(ui::Icon::Record), None, false)
-                        .clicked()
+                    if ui::primary(ui, "Почати запис", Some(ui::Icon::Mic), None, false).clicked()
                     {
                         start = true;
                     }
