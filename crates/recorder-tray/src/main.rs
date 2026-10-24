@@ -58,6 +58,14 @@ enum Check {
     Failed(String),
 }
 
+/// A recording being closed on a background thread: capture devices take
+/// a moment to shut down, and the window must not freeze meanwhile.
+struct Saving {
+    dir: PathBuf,
+    elapsed_ms: u64,
+    thread: std::thread::JoinHandle<Result<recorder_app::Manifest>>,
+}
+
 struct LastRecording {
     dir: PathBuf,
     started: DateTime<Utc>,
@@ -98,6 +106,7 @@ struct App {
     /// The running channel check and when it started.
     check: Option<(Monitor, Instant)>,
     check_result: Option<[Check; 2]>,
+    saving: Option<Saving>,
     /// Privacy permissions and when they were last checked.
     permissions: Vec<(Permission, Access)>,
     permissions_checked: Instant,
@@ -132,6 +141,7 @@ impl App {
             smoke_pause: dev.smoke_pause,
             check: None,
             check_result: None,
+            saving: None,
             screenshot: dev
                 .screenshot
                 .map(|p| (p, dev.screenshot_at.unwrap_or(2.0))),
@@ -247,7 +257,7 @@ impl App {
     }
 
     fn start(&mut self) {
-        if self.recorder.is_some() {
+        if self.recorder.is_some() || self.saving.is_some() {
             return;
         }
         if self.settings.consent_reminder_dismissed {
@@ -274,7 +284,7 @@ impl App {
             return;
         };
         let st = monitor.status();
-        drop(monitor);
+        close_in_background(monitor);
         self.check_result = Some(std::array::from_fn(|ch| match &st.failed[ch] {
             Some(e) if st.max[ch] < CHECK_WORKS => Check::Failed(e.clone()),
             _ if st.max[ch] >= CHECK_WORKS => Check::Works,
@@ -284,7 +294,9 @@ impl App {
 
     fn begin(&mut self) {
         // The check holds the devices; a recording opens them itself.
-        self.check = None;
+        if let Some((monitor, _)) = self.check.take() {
+            close_in_background(monitor);
+        }
         self.check_result = None;
         let opts = RecorderOptions {
             root: self.settings.recordings_dir(),
@@ -319,14 +331,38 @@ impl App {
         }
     }
 
+    /// Stops capture at once and closes the session in the background; the
+    /// result arrives in [`Self::collect_saved`].
     fn stop(&mut self) {
         let Some(r) = self.recorder.take() else {
             return;
         };
         self.drain_notices(&r);
-        let dir = r.status().dir;
+        let st = r.status();
         self.status = None;
-        match r.stop() {
+        let thread = std::thread::spawn(move || r.stop());
+        self.saving = Some(Saving {
+            dir: st.dir,
+            elapsed_ms: st.elapsed_ms,
+            thread,
+        });
+    }
+
+    /// Picks up a session closed in the background; `wait` blocks until it
+    /// is (on quit).
+    fn collect_saved(&mut self, wait: bool) {
+        if !wait && !self.saving.as_ref().is_some_and(|s| s.thread.is_finished()) {
+            return;
+        }
+        let Some(saving) = self.saving.take() else {
+            return;
+        };
+        let dir = saving.dir;
+        let result = saving
+            .thread
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the recording thread panicked")));
+        match result {
             Ok(m) => {
                 let seconds: u64 = m.parts.iter().map(|p| p.duration_ms).sum::<u64>() / 1000;
                 tracing::info!(dir = %dir.display(), seconds, "recording stopped from the window");
@@ -378,6 +414,7 @@ impl App {
 
     /// Notices, a session that ended on its own, timers, close requests.
     fn poll(&mut self, ctx: &egui::Context) {
+        self.collect_saved(false);
         let missing = self.permissions.iter().any(|(_, a)| *a != Access::Granted);
         if missing && self.permissions_checked.elapsed() >= Duration::from_secs(1) {
             // Picks up a switch flipped in System Settings without a restart.
@@ -476,8 +513,13 @@ impl App {
     /// The main card: status, the timer and the one action.
     fn transport(&mut self, ui: &mut egui::Ui) {
         let st = self.status.clone();
+        // While the last session closes, keep its duration on screen.
+        let saved_ms = self.saving.as_ref().map(|s| s.elapsed_ms);
         ui::card(ui, |ui| {
             ui::card_header(ui, "Call recording", |ui| match &st {
+                None if saved_ms.is_some() => {
+                    ui::pill(ui, "Saving…", ui::Tone::Grey, false);
+                }
                 None => {
                     ui::pill(ui, "Ready", ui::Tone::Blue, false);
                 }
@@ -494,13 +536,14 @@ impl App {
             });
             ui.add_space(ui::S2);
             ui.label(ui::caption("Duration"));
-            let elapsed = st.as_ref().map_or(0, |s| s.elapsed_ms / 1000);
+            let elapsed = st.as_ref().map(|s| s.elapsed_ms).or(saved_ms).unwrap_or(0) / 1000;
             ui.label(
                 RichText::new(hms(elapsed))
                     .font(FontId::new(42.0, ui::bold()))
                     .color(match &st {
                         Some(s) if !s.paused => ui::INK,
                         Some(_) => ui::INK_SECONDARY,
+                        None if saved_ms.is_some() => ui::INK_SECONDARY,
                         None => ui::INK_MUTED,
                     }),
             );
@@ -958,6 +1001,7 @@ impl eframe::App for App {
         self.close_modal(ctx);
 
         if self.recorder.is_some()
+            || self.saving.is_some()
             || self.check.is_some()
             || self.smoke_until.is_some()
             || self.screenshot.is_some()
@@ -975,12 +1019,14 @@ impl eframe::App for App {
     /// closed cleanly before the process exits.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stop();
+        self.collect_saved(true);
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
         self.stop();
+        self.collect_saved(true);
     }
 }
 
@@ -991,6 +1037,11 @@ fn modal_title(ui: &mut egui::Ui, text: &str) {
             .color(ui::INK),
     );
     ui.add_space(ui::S1);
+}
+
+/// Devices take a moment to close; the window does not wait for it.
+fn close_in_background(monitor: Monitor) {
+    std::thread::spawn(move || drop(monitor));
 }
 
 fn current_permissions() -> Vec<(Permission, Access)> {

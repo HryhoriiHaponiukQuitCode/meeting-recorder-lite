@@ -13,6 +13,7 @@ pub mod settings;
 pub use monitor::{Monitor, MonitorStatus};
 pub use recorder::{AecMode, Notice, Recorder, RecorderOptions, Status, SystemOption};
 pub use recorder_capture::Source;
+pub use recorder_core::manifest::Manifest;
 pub use recorder_core::recovery::{Recovered, recover_all};
 
 /// Name used for folders, logs and the app bundle.
