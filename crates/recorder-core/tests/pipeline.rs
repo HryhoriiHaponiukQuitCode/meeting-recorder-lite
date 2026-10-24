@@ -487,16 +487,17 @@ fn echo_from_speakers_is_removed_when_aec_is_on() {
 /// not filled with silence, even if the host clock kept running.
 #[test]
 fn sleep_starts_a_new_part_without_recording_the_gap() {
-    gap_starts_a_new_part(Gap::Sleep, "sleep");
+    skip_gap(Gap::Sleep, "sleep");
 }
 
-/// A user pause works the same way, with its own event in the manifest.
+/// A user pause skips the gap the same way but keeps writing the same part,
+/// so a paused call stays one file.
 #[test]
-fn pause_starts_a_new_part_without_recording_the_gap() {
-    gap_starts_a_new_part(Gap::Pause, "pause");
+fn pause_continues_the_same_part_without_recording_the_gap() {
+    skip_gap(Gap::Pause, "pause");
 }
 
-fn gap_starts_a_new_part(gap: Gap, event: &str) {
+fn skip_gap(gap: Gap, event: &str) {
     let root = temp_root(event);
     let mut engine = new_engine(&root, 600);
     let dir = engine.session().dir().to_path_buf();
@@ -523,22 +524,33 @@ fn gap_starts_a_new_part(gap: Gap, event: &str) {
         engine.tick((t * 1e9) as u64).unwrap();
     }
     let m = engine.finish((t * 1e9) as u64).unwrap();
-    assert_eq!(m.parts.len(), 2);
     let total: u64 = m.parts.iter().map(|p| p.duration_ms).sum();
     assert!(
         total < 6_000,
-        "recorded {total} ms, the sleep must not be recorded"
+        "recorded {total} ms, the gap must not be recorded"
     );
-    assert!(m.events.iter().any(|e| e.kind == event));
-    let gap = m.parts[1].started_at_utc.unwrap() - m.parts[0].started_at_utc.unwrap();
-    assert!(
-        gap.num_seconds() >= 62,
-        "wall-clock start of part 2 is {gap:?} after part 1"
-    );
+    let resumed_at = m
+        .events
+        .iter()
+        .find(|e| e.kind == event)
+        .expect("gap event")
+        .t_ms;
+    if gap == Gap::Sleep {
+        assert_eq!(m.parts.len(), 2);
+        assert_eq!(m.parts[1].start_offset_ms, resumed_at);
+        let wall = m.parts[1].started_at_utc.unwrap() - m.parts[0].started_at_utc.unwrap();
+        assert!(
+            wall.num_seconds() >= 62,
+            "wall-clock start of part 2 is {wall:?} after part 1"
+        );
+    } else {
+        assert_eq!(m.parts.len(), 1, "a pause must not split the file");
+    }
     let (_, l, _) = decode_session(&dir);
-    // Audio right after the resume point is the tone, not silence.
-    let p2 = (m.parts[1].start_offset_ms * 16) as usize;
-    assert!(rms_dbfs(&l[p2 + 8_000..p2 + 16_000]) > -15.0);
+    // The tone runs straight across the resume point: no silence for the gap.
+    let p = (resumed_at * 16) as usize;
+    assert!(rms_dbfs(&l[p - 8_000..p]) > -15.0);
+    assert!(rms_dbfs(&l[p + 8_000..p + 16_000]) > -15.0);
     std::fs::remove_dir_all(root).ok();
 }
 

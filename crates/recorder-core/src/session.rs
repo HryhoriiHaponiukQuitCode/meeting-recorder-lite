@@ -43,7 +43,7 @@ pub struct SessionWriter {
     frames_per_part: u64,
     frames_total: u64,
     part_start_frame: u64,
-    /// Time the session spent paused (system sleep), not on the timeline.
+    /// Time the session spent asleep or paused, not on the timeline.
     paused_ms: u64,
     lock: Option<File>,
 }
@@ -185,10 +185,14 @@ impl SessionWriter {
         Ok(())
     }
 
-    /// Closes the current part after a gap of `paused_ms`. The next frame
-    /// starts a new part; the gap is recorded as a `sleep` or `pause` event.
+    /// Records a gap of `paused_ms` as a `sleep` or `pause` event. After a
+    /// sleep the next frame starts a new part (devices were reopened and the
+    /// part's wall-clock start must stay exact); after a user pause the same
+    /// part continues, so a paused call stays one file.
     pub fn pause(&mut self, gap: Gap, paused_ms: u64) -> io::Result<()> {
-        self.close_part(None)?;
+        if gap == Gap::Sleep {
+            self.close_part(None)?;
+        }
         self.paused_ms += paused_ms;
         self.event(gap.event(), serde_json::json!({ "duration_ms": paused_ms }))
     }

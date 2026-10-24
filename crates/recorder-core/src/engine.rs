@@ -59,9 +59,10 @@ impl Engine {
 
     /// Call after a gap of `paused_ms` (system sleep or a user pause) during
     /// which nothing was ingested. Commits what was captured before
-    /// `before_ns` (the last host time before the gap), closes the part and
-    /// re-anchors the timeline at `now_ns`, so the gap is not recorded as
-    /// silence even on hosts whose clock keeps running.
+    /// `before_ns` (the last host time before the gap), records the gap (a
+    /// sleep also closes the part) and re-anchors the timeline at `now_ns`,
+    /// so the gap is not recorded as silence even on hosts whose clock keeps
+    /// running.
     pub fn resume_after_pause(
         &mut self,
         gap: Gap,
