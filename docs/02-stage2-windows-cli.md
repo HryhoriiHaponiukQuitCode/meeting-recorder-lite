@@ -51,10 +51,11 @@
 | Типи для Windows (`cargo clippy --target x86_64-pc-windows-msvc`) | ✅ без попереджень |
 | Розмір бінарника (macOS arm64, release) | 2,4 МБ |
 
+**CI на GitHub** ([перший запуск](https://github.com/HryhoriiHaponiukQuitCode/meeting-recorder-lite/actions/runs/40092512942)): fmt, clippy і всі тести пройшли на `windows-latest` і `macos-latest`. `recorder.exe` залежить лише від системних DLL Windows (kernel32, ole32, mmdevapi тощо), без `VCRUNTIME140.dll`, тож VC++ Redistributable не потрібен.
+
 **Не перевірено** — і це потрібно від вас:
 - реальний WASAPI loopback;
-- запуск `.exe` на Windows;
-- статичне лінкування CRT. CI покаже DLL-залежності `recorder.exe`. Якщо там буде `VCRUNTIME140.dll`, на чистій системі знадобиться VC++ Redistributable, і я це виправлю.
+- запуск `.exe` на справжній Windows-машині.
 
 ## Відхилення від плану етапу 1
 
@@ -64,7 +65,11 @@
 
 ### 1. Отримати `recorder.exe`
 
-**Варіант А (рекомендую).** Код пушиться у ваш GitHub-репозиторій, CI збирає `recorder.exe`. Його можна завантажити в розділі Actions → останній запуск → Artifacts → `recorder-windows-x64`.
+**Варіант А (рекомендую).** Завантажити зібраний CI файл: [meeting-recorder-lite → Actions](https://github.com/HryhoriiHaponiukQuitCode/meeting-recorder-lite/actions) → останній зелений запуск → Artifacts → `recorder-windows-x64` (zip з `recorder.exe`, ~1,4 МБ). Або з консолі:
+
+   ```powershell
+   gh run download --repo HryhoriiHaponiukQuitCode/meeting-recorder-lite --name recorder-windows-x64
+   ```
 
 **Варіант Б.** Зібрати локально:
 1. Встановити Rust: https://rustup.rs (`rustup-init.exe`, усе за замовчуванням).
