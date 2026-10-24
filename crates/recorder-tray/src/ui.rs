@@ -1,462 +1,700 @@
-//! Look of the window: palette, fonts and the few custom controls.
-//!
-//! The direction is a small hardware recorder: a matte graphite (or paper
-//! white) body, one red REC colour that only appears for recording, segmented
-//! channel meters, and quiet cards with no visible chrome until it matters.
+//! Look of the window, matched to the QuitCode web app: a pale blue-grey
+//! canvas washed with blue at the top, white cards with a soft shadow, bold
+//! navy figures, one blue primary action and pastel status pills.
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontFamily, FontId, Response, RichText, Sense, Shadow, Stroke,
-    Theme, Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, FontFamily, FontId, Margin, Pos2, Rect, Response,
+    RichText, Sense, Shadow, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
-/// Colours for one theme. Every surface is one hue; only lightness changes.
-#[derive(Clone, Copy)]
-pub struct Palette {
-    pub canvas: Color32,
-    pub card: Color32,
-    pub inset: Color32,
-    pub control: Color32,
-    pub control_hover: Color32,
-    pub hairline: Color32,
-    pub ink: Color32,
-    pub ink_secondary: Color32,
-    pub ink_muted: Color32,
-    pub rec: Color32,
-    pub signal: Color32,
-    pub caution: Color32,
-    pub brand: Color32,
-    pub meter_off: Color32,
-}
-
-pub const DARK: Palette = Palette {
-    canvas: Color32::from_rgb(0x15, 0x15, 0x17),
-    card: Color32::from_rgb(0x1d, 0x1d, 0x20),
-    inset: Color32::from_rgb(0x10, 0x10, 0x12),
-    control: Color32::from_rgb(0x27, 0x27, 0x2b),
-    control_hover: Color32::from_rgb(0x30, 0x30, 0x35),
-    hairline: Color32::from_rgb(0x2a, 0x2a, 0x2e),
-    ink: Color32::from_rgb(0xee, 0xee, 0xf0),
-    ink_secondary: Color32::from_rgb(0xa3, 0xa3, 0xab),
-    ink_muted: Color32::from_rgb(0x6e, 0x6e, 0x77),
-    rec: Color32::from_rgb(0xe5, 0x48, 0x4d),
-    signal: Color32::from_rgb(0x3d, 0xb8, 0x77),
-    caution: Color32::from_rgb(0xf2, 0xa8, 0x2c),
-    brand: Color32::from_rgb(0x39, 0x85, 0xf8),
-    meter_off: Color32::from_rgb(0x26, 0x26, 0x2a),
-};
-
-pub const LIGHT: Palette = Palette {
-    canvas: Color32::from_rgb(0xf3, 0xf3, 0xf5),
-    card: Color32::from_rgb(0xff, 0xff, 0xff),
-    inset: Color32::from_rgb(0xea, 0xea, 0xed),
-    control: Color32::from_rgb(0xe8, 0xe8, 0xeb),
-    control_hover: Color32::from_rgb(0xdf, 0xdf, 0xe3),
-    hairline: Color32::from_rgb(0xe2, 0xe2, 0xe6),
-    ink: Color32::from_rgb(0x18, 0x18, 0x1b),
-    ink_secondary: Color32::from_rgb(0x55, 0x55, 0x5e),
-    ink_muted: Color32::from_rgb(0x8c, 0x8c, 0x95),
-    rec: Color32::from_rgb(0xdc, 0x3a, 0x40),
-    signal: Color32::from_rgb(0x2a, 0x9d, 0x60),
-    caution: Color32::from_rgb(0xc9, 0x82, 0x00),
-    brand: Color32::from_rgb(0x2f, 0x78, 0xe8),
-    meter_off: Color32::from_rgb(0xe4, 0xe4, 0xe8),
-};
-
-pub fn palette(ui: &Ui) -> Palette {
-    if ui.visuals().dark_mode { DARK } else { LIGHT }
-}
+pub const CANVAS: Color32 = Color32::from_rgb(0xf4, 0xf6, 0xfa);
+/// The blue wash at the top of the canvas.
+const CANVAS_TINT: Color32 = Color32::from_rgb(0xe6, 0xef, 0xfd);
+pub const CARD: Color32 = Color32::WHITE;
+pub const HAIRLINE: Color32 = Color32::from_rgb(0xe8, 0xec, 0xf2);
+const BORDER: Color32 = Color32::from_rgb(0xdc, 0xe2, 0xea);
+const BORDER_HOVER: Color32 = Color32::from_rgb(0xc4, 0xcd, 0xd9);
+const HOVER: Color32 = Color32::from_rgb(0xf7, 0xf9, 0xfc);
+const TRACK: Color32 = Color32::from_rgb(0xeb, 0xef, 0xf4);
+pub const INK: Color32 = Color32::from_rgb(0x14, 0x1c, 0x2b);
+pub const INK_SECONDARY: Color32 = Color32::from_rgb(0x4b, 0x56, 0x68);
+pub const INK_MUTED: Color32 = Color32::from_rgb(0x8a, 0x94, 0xa6);
+pub const BLUE: Color32 = Color32::from_rgb(0x17, 0x74, 0xf0);
+const BLUE_HOVER: Color32 = Color32::from_rgb(0x0e, 0x63, 0xd6);
+pub const RED: Color32 = Color32::from_rgb(0xe0, 0x3b, 0x3b);
+const AMBER: Color32 = Color32::from_rgb(0xf3, 0xa7, 0x12);
 
 /// Spacing scale (4 px base).
 pub const S1: f32 = 4.0;
 pub const S2: f32 = 8.0;
 pub const S3: f32 = 12.0;
 pub const S4: f32 = 16.0;
-pub const S6: f32 = 24.0;
 
-/// Corner radii: controls < cards.
-pub const R_CONTROL: u8 = 7;
-pub const R_CARD: u8 = 12;
+/// Corner radii: pills < controls < cards.
+const R_PILL: u8 = 8;
+const R_CONTROL: u8 = 10;
+pub const R_CARD: u8 = 16;
 
-/// Named font families (fall back to the default UI font when the system
-/// has no separate file for them).
-pub fn semibold() -> FontFamily {
-    FontFamily::Name("semibold".into())
+/// Pastel tones of the status pills and icon tiles: (background, text).
+#[derive(Clone, Copy)]
+pub enum Tone {
+    Blue,
+    Amber,
+    Green,
+    Red,
+    Grey,
+}
+
+impl Tone {
+    fn colors(self) -> (Color32, Color32) {
+        match self {
+            Tone::Blue => (
+                Color32::from_rgb(0xe6, 0xf0, 0xff),
+                Color32::from_rgb(0x17, 0x68, 0xd8),
+            ),
+            Tone::Amber => (
+                Color32::from_rgb(0xff, 0xf2, 0xd0),
+                Color32::from_rgb(0xa1, 0x62, 0x00),
+            ),
+            Tone::Green => (
+                Color32::from_rgb(0xdc, 0xf5, 0xe6),
+                Color32::from_rgb(0x13, 0x80, 0x46),
+            ),
+            Tone::Red => (
+                Color32::from_rgb(0xfd, 0xe5, 0xe5),
+                Color32::from_rgb(0xc4, 0x28, 0x28),
+            ),
+            Tone::Grey => (
+                Color32::from_rgb(0xee, 0xf1, 0xf5),
+                Color32::from_rgb(0x4b, 0x56, 0x68),
+            ),
+        }
+    }
+}
+
+/// Medium weight: titles, names, buttons.
+pub fn medium() -> FontFamily {
+    FontFamily::Name("medium".into())
+}
+
+/// Bold weight: the big figures.
+pub fn bold() -> FontFamily {
+    FontFamily::Name("bold".into())
 }
 
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
-    for (theme, p) in [(Theme::Dark, DARK), (Theme::Light, LIGHT)] {
-        ctx.set_visuals_of(theme, visuals(theme, p));
-    }
+    // One light look, the same as the web app, whatever the system theme.
+    ctx.set_theme(egui::Theme::Light);
+    ctx.set_visuals_of(egui::Theme::Light, visuals());
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = vec2(S2, S2);
-        style.spacing.button_padding = vec2(S3, 6.0);
-        style.spacing.interact_size.y = 30.0;
+        style.spacing.button_padding = vec2(S4, 8.0);
+        style.spacing.interact_size.y = 34.0;
         // A thin bar over the content instead of a gutter that clips cards.
         style.spacing.scroll = egui::style::ScrollStyle::floating();
+        style.interaction.selectable_labels = false;
         style
             .text_styles
             .insert(egui::TextStyle::Body, FontId::proportional(14.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Button, FontId::proportional(14.0));
+            .insert(egui::TextStyle::Button, FontId::new(14.0, medium()));
         style
             .text_styles
-            .insert(egui::TextStyle::Small, FontId::proportional(11.5));
+            .insert(egui::TextStyle::Small, FontId::proportional(12.0));
     });
 }
 
-fn visuals(theme: Theme, p: Palette) -> egui::Visuals {
-    let mut v = match theme {
-        Theme::Dark => egui::Visuals::dark(),
-        Theme::Light => egui::Visuals::light(),
-    };
-    v.panel_fill = p.canvas;
-    v.window_fill = p.card;
-    v.extreme_bg_color = p.inset;
-    v.faint_bg_color = p.card;
-    v.window_stroke = Stroke::new(1.0_f32, p.hairline);
-    v.window_corner_radius = CornerRadius::same(R_CARD + 2);
+fn visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::light();
+    v.panel_fill = CANVAS;
+    v.window_fill = CARD;
+    v.extreme_bg_color = TRACK;
+    v.faint_bg_color = CANVAS;
+    v.window_stroke = Stroke::new(1.0_f32, HAIRLINE);
+    v.window_corner_radius = CornerRadius::same(R_CARD);
     v.window_shadow = Shadow {
-        offset: [0, 12],
-        blur: 32,
+        offset: [0, 16],
+        blur: 40,
         spread: 0,
-        color: Color32::from_black_alpha(if theme == Theme::Dark { 120 } else { 40 }),
+        color: Color32::from_rgba_unmultiplied(16, 36, 72, 46),
     };
     v.popup_shadow = v.window_shadow;
-    v.selection.bg_fill = p.brand;
-    v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    v.hyperlink_color = p.brand;
+    v.selection.bg_fill = BLUE.gamma_multiply(0.25);
+    v.selection.stroke = Stroke::new(1.0_f32, BLUE);
+    v.hyperlink_color = BLUE;
     let radius = CornerRadius::same(R_CONTROL);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.ink);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.hairline);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, INK);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, HAIRLINE);
     v.widgets.noninteractive.corner_radius = radius;
-    for (w, fill) in [
-        (&mut v.widgets.inactive, p.control),
-        (&mut v.widgets.hovered, p.control_hover),
-        (&mut v.widgets.active, p.control_hover),
-        (&mut v.widgets.open, p.control),
+    for (w, fill, border) in [
+        (&mut v.widgets.inactive, CARD, BORDER),
+        (&mut v.widgets.hovered, HOVER, BORDER_HOVER),
+        (&mut v.widgets.active, TRACK, BORDER_HOVER),
+        (&mut v.widgets.open, CARD, BORDER),
     ] {
         w.bg_fill = fill;
         w.weak_bg_fill = fill;
-        w.bg_stroke = Stroke::NONE;
-        w.fg_stroke = Stroke::new(1.0_f32, p.ink);
+        w.bg_stroke = Stroke::new(1.0_f32, border);
+        w.fg_stroke = Stroke::new(1.0_f32, INK);
         w.corner_radius = radius;
         w.expansion = 0.0;
     }
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.hairline);
     v
 }
 
-/// Uses the platform UI font (San Francisco / Segoe UI) instead of the
-/// bundled one, so the window reads as part of the system.
+/// A built-in system family with real weights: Helvetica Neue on macOS
+/// (San Francisco ships only as a variable font, which renders at one
+/// weight), Segoe UI on Windows. Each file is read once and shared by its
+/// faces.
 fn install_fonts(ctx: &egui::Context) {
     #[cfg(target_os = "macos")]
-    let files: &[(&str, &str)] = &[
-        ("ui", "/System/Library/Fonts/SFNS.ttf"),
-        ("mono", "/System/Library/Fonts/SFNSMono.ttf"),
+    let faces: &[(&str, &str, u32)] = &[
+        ("regular", "/System/Library/Fonts/HelveticaNeue.ttc", 0),
+        ("medium", "/System/Library/Fonts/HelveticaNeue.ttc", 10),
+        ("bold", "/System/Library/Fonts/HelveticaNeue.ttc", 1),
     ];
     #[cfg(windows)]
-    let files: &[(&str, &str)] = &[
-        ("ui", "C:\\Windows\\Fonts\\segoeui.ttf"),
-        ("semibold", "C:\\Windows\\Fonts\\seguisb.ttf"),
-        ("mono", "C:\\Windows\\Fonts\\consola.ttf"),
+    let faces: &[(&str, &str, u32)] = &[
+        ("regular", "C:\\Windows\\Fonts\\segoeui.ttf", 0),
+        ("medium", "C:\\Windows\\Fonts\\seguisb.ttf", 0),
+        ("bold", "C:\\Windows\\Fonts\\segoeuib.ttf", 0),
     ];
     #[cfg(not(any(windows, target_os = "macos")))]
-    let files: &[(&str, &str)] = &[];
+    let faces: &[(&str, &str, u32)] = &[];
 
     let mut fonts = egui::FontDefinitions::default();
-    let mut loaded = |name: &str| -> bool {
-        let Some((_, path)) = files.iter().find(|(n, _)| *n == name) else {
-            return false;
+    let mut files: Vec<(&str, &'static [u8])> = Vec::new();
+    let mut loaded = Vec::new();
+    for &(name, path, index) in faces {
+        let bytes = match files.iter().find(|(p, _)| *p == path) {
+            Some((_, b)) => *b,
+            None => match std::fs::read(path) {
+                // Fonts live as long as the app.
+                Ok(b) => {
+                    let b: &'static [u8] = Box::leak(b.into_boxed_slice());
+                    files.push((path, b));
+                    b
+                }
+                Err(e) => {
+                    tracing::debug!(path, error = %e, "system font not available");
+                    continue;
+                }
+            },
         };
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                fonts
-                    .font_data
-                    .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
-                true
-            }
-            Err(e) => {
-                tracing::debug!(path, error = %e, "system font not available");
-                false
-            }
-        }
-    };
-    let ui = loaded("ui");
-    let semi = loaded("semibold");
-    let mono = loaded("mono");
-    let proportional = fonts
+        let mut data = egui::FontData::from_static(bytes);
+        data.index = index;
+        fonts.font_data.insert(name.to_owned(), data.into());
+        loaded.push(name);
+    }
+    let fallback = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    if ui {
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .insert(0, "ui".into());
-    }
-    if mono {
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .insert(0, "mono".into());
-    }
-    let mut semibold_chain = Vec::new();
-    if semi {
-        semibold_chain.push("semibold".to_owned());
-    }
-    if ui {
-        semibold_chain.push("ui".to_owned());
-    }
-    semibold_chain.extend(proportional);
-    fonts.families.insert(semibold(), semibold_chain);
+    let chain = |first: &str| -> Vec<String> {
+        [first, "regular"]
+            .into_iter()
+            .filter(|n| loaded.contains(n))
+            .map(str::to_owned)
+            .chain(fallback.iter().cloned())
+            .collect()
+    };
+    fonts
+        .families
+        .insert(FontFamily::Proportional, chain("regular"));
+    fonts.families.insert(medium(), chain("medium"));
+    fonts.families.insert(bold(), chain("bold"));
     ctx.set_fonts(fonts);
 }
 
-/// Small uppercase label above a group, like the legend on a hardware panel.
-pub fn eyebrow(ui: &mut Ui, text: &str) {
-    let p = palette(ui);
-    ui.label(
-        RichText::new(text.to_uppercase())
-            .font(FontId::new(11.0, semibold()))
-            .color(p.ink_muted)
-            .extra_letter_spacing(0.6),
-    );
+/// The canvas: pale grey with a blue wash fading out from the top.
+pub fn backdrop(ctx: &egui::Context) {
+    let rect = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    painter.rect_filled(rect, 0, CANVAS);
+    let fade = Rect::from_min_size(rect.min, vec2(rect.width(), 260.0_f32.min(rect.height())));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(fade.left_top(), CANVAS_TINT);
+    mesh.colored_vertex(fade.right_top(), CANVAS_TINT);
+    mesh.colored_vertex(fade.right_bottom(), CANVAS);
+    mesh.colored_vertex(fade.left_bottom(), CANVAS);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(Shape::mesh(mesh));
 }
 
-/// A quiet surface one step above the canvas.
-pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let p = palette(ui);
+pub fn card_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(p.card)
-        .stroke(Stroke::new(1.0_f32, p.hairline))
+        .fill(CARD)
+        .stroke(Stroke::new(1.0_f32, HAIRLINE))
         .corner_radius(R_CARD)
-        .inner_margin(S4)
+        .shadow(Shadow {
+            offset: [0, 2],
+            blur: 12,
+            spread: 0,
+            color: Color32::from_rgba_unmultiplied(16, 36, 72, 16),
+        })
+        .inner_margin(Margin::same(18))
+}
+
+/// A white card with a hairline and a soft shadow.
+pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    card_frame()
         .show(ui, |ui| {
-            // Leave room for the 1 px stroke on the right.
-            ui.set_width(ui.available_width() - 1.0);
+            ui.set_width(ui.available_width());
             add(ui)
         })
         .inner
 }
 
-/// The transport button: a red disc to start, a red square to stop.
-pub fn record_button(ui: &mut Ui, recording: bool) -> Response {
-    let p = palette(ui);
-    let size = 64.0;
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    let painter = ui.painter_at(rect.expand(2.0));
-    let c = rect.center();
-    let hovered = response.hovered();
-    let pressed = response.is_pointer_button_down_on();
-    // Housing ring.
-    painter.circle_filled(
-        c,
-        size / 2.0,
-        if hovered { p.control_hover } else { p.control },
-    );
-    painter.circle_stroke(c, size / 2.0 - 0.5, Stroke::new(1.0_f32, p.hairline));
-    let scale = if pressed { 0.94 } else { 1.0 };
-    let rec = if hovered {
-        p.rec.gamma_multiply(1.08)
-    } else {
-        p.rec
-    };
-    if recording {
-        let half = 11.0 * scale;
-        painter.rect_filled(
-            egui::Rect::from_center_size(c, Vec2::splat(half * 2.0)),
-            CornerRadius::same(4),
-            rec,
-        );
-    } else {
-        painter.circle_filled(c, 21.0 * scale, rec);
-    }
-    if response.has_focus() {
-        painter.circle_stroke(c, size / 2.0 + 1.5, Stroke::new(2.0_f32, p.brand));
-    }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A segmented channel meter: 0 dBFS full, −60 dBFS empty. `None` = idle.
-pub fn channel_meter(ui: &mut Ui, label: &str, hint: &str, peak: Option<f32>) {
-    let p = palette(ui);
+/// A card title on the left and something (usually a pill) on the right.
+pub fn card_header(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(p.ink));
-        ui.label(RichText::new(hint).color(p.ink_muted));
-    });
-    const SEGMENTS: usize = 28;
-    let gap = 2.0;
-    let height = 8.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    let painter = ui.painter_at(rect);
-    let seg_w = (rect.width() - gap * (SEGMENTS - 1) as f32) / SEGMENTS as f32;
-    let db = peak.map(|v| if v > 0.0 { 20.0 * v.log10() } else { -120.0 });
-    let lit = db.map_or(0, |db| {
-        (((db + 60.0) / 60.0).clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize
-    });
-    for i in 0..SEGMENTS {
-        let x = rect.left() + i as f32 * (seg_w + gap);
-        let seg = egui::Rect::from_min_size(pos2(x, rect.top()), vec2(seg_w, height));
-        let on = i < lit;
-        let color = if !on {
-            p.meter_off
-        } else if i >= SEGMENTS - 2 {
-            p.rec
-        } else if i >= SEGMENTS - 6 {
-            p.caution
-        } else {
-            p.signal
-        };
-        painter.rect_filled(seg, CornerRadius::same(2), color);
-    }
-}
-
-/// An iOS-style switch.
-pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
-    let p = palette(ui);
-    let size = vec2(38.0, 22.0);
-    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
-    if response.clicked() {
-        *on = !*on;
-        response.mark_changed();
-    }
-    let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.15);
-    let painter = ui.painter_at(rect);
-    let track = if *on { p.signal } else { p.control_hover };
-    painter.rect_filled(rect, CornerRadius::same(11), track);
-    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-    painter.circle_filled(pos2(x, rect.center().y), 8.5, Color32::WHITE);
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A segmented control; returns true when the selection changed.
-pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
-    let p = palette(ui);
-    let height = 30.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(R_CONTROL + 1), p.inset);
-    let w = (rect.width() - 4.0) / options.len() as f32;
-    let mut changed = false;
-    for (i, (option, label)) in options.iter().enumerate() {
-        let seg = egui::Rect::from_min_size(
-            pos2(rect.left() + 2.0 + i as f32 * w, rect.top() + 2.0),
-            vec2(w, height - 4.0),
+        ui.label(
+            RichText::new(title)
+                .font(FontId::new(15.5, medium()))
+                .color(INK),
         );
-        let response = ui.interact(seg, ui.id().with(("segment", i)), Sense::click());
-        let selected = *value == *option;
-        if selected {
-            ui.painter()
-                .rect_filled(seg, CornerRadius::same(R_CONTROL - 1), p.card);
-            ui.painter().rect_stroke(
-                seg,
-                CornerRadius::same(R_CONTROL - 1),
-                Stroke::new(1.0_f32, p.hairline),
-                egui::StrokeKind::Inside,
-            );
-        } else if response.hovered() {
-            ui.painter()
-                .rect_filled(seg, CornerRadius::same(R_CONTROL - 1), p.control);
-        }
-        let color = if selected { p.ink } else { p.ink_secondary };
-        ui.painter().text(
-            seg.center(),
-            egui::Align2::CENTER_CENTER,
-            *label,
-            FontId::new(
-                13.0,
-                if selected {
-                    semibold()
-                } else {
-                    FontFamily::Proportional
-                },
-            ),
-            color,
-        );
-        if response.clicked() && !selected {
-            *value = *option;
-            changed = true;
-        }
-    }
-    changed
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
+    });
 }
 
-/// A text-only button in the brand colour, for secondary actions.
-pub fn link(ui: &mut Ui, text: &str) -> Response {
-    let p = palette(ui);
-    let r = ui.add(
-        egui::Button::new(RichText::new(text).color(p.brand))
-            .frame(false)
-            .min_size(vec2(0.0, 24.0)),
+/// Secondary text: hints, units, captions.
+pub fn muted(text: impl Into<String>) -> RichText {
+    RichText::new(text).color(INK_MUTED).size(12.5)
+}
+
+/// The grey label above a value ("Тривалість").
+pub fn caption(text: impl Into<String>) -> RichText {
+    RichText::new(text).color(INK_SECONDARY).size(13.0)
+}
+
+/// A pastel status pill, optionally with a dot before the text.
+pub fn pill(ui: &mut Ui, text: &str, tone: Tone, dot: bool) -> Response {
+    let (bg, fg) = tone.colors();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), FontId::new(12.5, medium()), fg);
+    let dot_w = if dot { 12.0 } else { 0.0 };
+    let size = vec2(galley.size().x + dot_w + 20.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, R_PILL, bg);
+    let x = rect.left() + 10.0;
+    if dot {
+        painter.circle_filled(pos2(x + 3.5, rect.center().y), 3.5, fg);
+    }
+    painter.galley(
+        pos2(x + dot_w, rect.center().y - galley.size().y / 2.0),
+        galley,
+        fg,
     );
-    r.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A neutral filled button.
-pub fn button(ui: &mut Ui, text: &str) -> Response {
-    ui.add(egui::Button::new(text).min_size(vec2(0.0, 30.0)))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    response
 }
 
 #[derive(Clone, Copy)]
 pub enum Icon {
-    Close,
+    Record,
+    Stop,
+    Arrow,
     Back,
+    Close,
     Settings,
+    Folder,
+    Mic,
+    Speaker,
+    Alert,
+    Info,
 }
 
-/// A small round icon button. Icons are drawn, not taken from a font, so
-/// they look the same with every system font.
-pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
-    let p = palette(ui);
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
-    if response.hovered() {
-        ui.painter().circle_filled(rect.center(), 14.0, p.control);
-    }
-    let color = if response.hovered() {
-        p.ink
-    } else {
-        p.ink_secondary
-    };
-    let stroke = Stroke::new(1.6_f32, color);
-    let painter = ui.painter();
-    let c = rect.center();
+/// Icons are drawn, not taken from a font, so they look the same with every
+/// system font.
+fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
+    let stroke = Stroke::new(1.7_f32, color);
+    let line = |a: Vec2, b: Vec2| painter.line_segment([c + a, c + b], stroke);
     match icon {
-        Icon::Close => {
-            let d = 4.5;
-            painter.line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
-            painter.line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
+        Icon::Record => {
+            painter.circle_filled(c, 5.5, color);
+        }
+        Icon::Stop => {
+            painter.rect_filled(Rect::from_center_size(c, Vec2::splat(10.0)), 2, color);
+        }
+        Icon::Arrow => {
+            line(vec2(-5.5, 0.0), vec2(5.5, 0.0));
+            line(vec2(5.5, 0.0), vec2(1.5, -4.0));
+            line(vec2(5.5, 0.0), vec2(1.5, 4.0));
         }
         Icon::Back => {
-            painter.line_segment([c + vec2(-6.0, 0.0), c + vec2(6.0, 0.0)], stroke);
-            painter.line_segment([c + vec2(-6.0, 0.0), c + vec2(-1.5, -4.5)], stroke);
-            painter.line_segment([c + vec2(-6.0, 0.0), c + vec2(-1.5, 4.5)], stroke);
+            line(vec2(-6.0, 0.0), vec2(6.0, 0.0));
+            line(vec2(-6.0, 0.0), vec2(-1.5, -4.5));
+            line(vec2(-6.0, 0.0), vec2(-1.5, 4.5));
+        }
+        Icon::Close => {
+            line(vec2(-4.5, -4.5), vec2(4.5, 4.5));
+            line(vec2(-4.5, 4.5), vec2(4.5, -4.5));
         }
         Icon::Settings => {
             // Three sliders: a mixing-desk glyph rather than a gear.
             for (dy, knob) in [(-5.0, 2.5), (0.0, -3.0), (5.0, 1.0)] {
-                painter.line_segment([c + vec2(-7.0, dy), c + vec2(7.0, dy)], stroke);
+                line(vec2(-7.0, dy), vec2(7.0, dy));
                 painter.circle_filled(c + vec2(knob, dy), 2.4, color);
             }
         }
+        Icon::Folder => {
+            let body = Rect::from_center_size(c + vec2(0.0, 1.0), vec2(15.0, 11.0));
+            painter.rect_stroke(body, 2, stroke, StrokeKind::Middle);
+            let tab = body.left_top();
+            painter.add(Shape::line(
+                vec![
+                    tab + vec2(0.0, 1.0),
+                    tab + vec2(1.5, -2.0),
+                    tab + vec2(5.5, -2.0),
+                    tab + vec2(7.0, 0.0),
+                ],
+                stroke,
+            ));
+        }
+        Icon::Mic => {
+            painter.rect_stroke(
+                Rect::from_min_max(c + vec2(-3.0, -7.5), c + vec2(3.0, 2.0)),
+                3,
+                stroke,
+                StrokeKind::Middle,
+            );
+            arc(painter, c + vec2(0.0, -1.5), 6.0, 0.0, 180.0, stroke);
+            line(vec2(0.0, 4.5), vec2(0.0, 7.5));
+        }
+        Icon::Speaker => {
+            painter.add(Shape::closed_line(
+                vec![
+                    c + vec2(-7.5, -2.5),
+                    c + vec2(-4.5, -2.5),
+                    c + vec2(-0.5, -6.0),
+                    c + vec2(-0.5, 6.0),
+                    c + vec2(-4.5, 2.5),
+                    c + vec2(-7.5, 2.5),
+                ],
+                stroke,
+            ));
+            arc(painter, c + vec2(0.5, 0.0), 3.5, -50.0, 50.0, stroke);
+            arc(painter, c + vec2(0.5, 0.0), 7.0, -50.0, 50.0, stroke);
+        }
+        Icon::Alert => {
+            line(vec2(0.0, -5.5), vec2(0.0, 1.5));
+            painter.circle_filled(c + vec2(0.0, 5.0), 1.2, color);
+        }
+        Icon::Info => {
+            painter.circle_filled(c + vec2(0.0, -5.0), 1.2, color);
+            line(vec2(0.0, -1.5), vec2(0.0, 5.5));
+        }
     }
+}
+
+/// An arc from `from` to `to` degrees (0 = right, 90 = down).
+fn arc(painter: &egui::Painter, c: Pos2, r: f32, from: f32, to: f32, stroke: Stroke) {
+    let points = (0..=16)
+        .map(|i| {
+            let a = (from + (to - from) * i as f32 / 16.0).to_radians();
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    painter.add(Shape::line(points, stroke));
+}
+
+struct ButtonLook {
+    fill: Color32,
+    hover: Color32,
+    border: Option<(Color32, Color32)>,
+    text: Color32,
+    icon: Color32,
+}
+
+/// A button with an optional icon before and after the text.
+fn icon_button_with_text(
+    ui: &mut Ui,
+    text: &str,
+    leading: Option<Icon>,
+    trailing: Option<Icon>,
+    look: ButtonLook,
+    full_width: bool,
+) -> Response {
+    const ICON: f32 = 14.0;
+    const GAP: f32 = 8.0;
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), FontId::new(14.0, medium()), look.text);
+    let icons = [leading, trailing].iter().flatten().count() as f32;
+    let content = galley.size().x + icons * (ICON + GAP);
+    let size = if full_width {
+        vec2(ui.available_width(), 44.0)
+    } else {
+        vec2(content + 32.0, 36.0)
+    };
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let hovered = response.hovered();
+    let pressed = response.is_pointer_button_down_on();
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        R_CONTROL,
+        if hovered { look.hover } else { look.fill },
+    );
+    if let Some((border, border_hover)) = look.border {
+        let color = if hovered { border_hover } else { border };
+        painter.rect_stroke(
+            rect,
+            R_CONTROL,
+            Stroke::new(1.0_f32, color),
+            StrokeKind::Inside,
+        );
+    }
+    let nudge = if pressed { 1.0 } else { 0.0 };
+    let cy = rect.center().y + nudge;
+    let mut x = rect.center().x - content / 2.0;
+    if let Some(icon) = leading {
+        draw_icon(painter, icon, pos2(x + ICON / 2.0, cy), look.icon);
+        x += ICON + GAP;
+    }
+    let text_w = galley.size().x;
+    painter.galley(pos2(x, cy - galley.size().y / 2.0), galley, look.text);
+    x += text_w + GAP;
+    if let Some(icon) = trailing {
+        draw_icon(painter, icon, pos2(x + ICON / 2.0, cy), look.icon);
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.expand(2.0),
+            R_CONTROL + 2,
+            Stroke::new(2.0_f32, BLUE.gamma_multiply(0.45)),
+            StrokeKind::Outside,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The blue primary action.
+pub fn primary(
+    ui: &mut Ui,
+    text: &str,
+    leading: Option<Icon>,
+    trailing: Option<Icon>,
+    full_width: bool,
+) -> Response {
+    let look = ButtonLook {
+        fill: BLUE,
+        hover: BLUE_HOVER,
+        border: None,
+        text: Color32::WHITE,
+        icon: Color32::WHITE,
+    };
+    icon_button_with_text(ui, text, leading, trailing, look, full_width)
+}
+
+/// The white outlined action, with an optional coloured icon.
+pub fn outline(
+    ui: &mut Ui,
+    text: &str,
+    icon: Option<(Icon, Color32)>,
+    full_width: bool,
+) -> Response {
+    let look = ButtonLook {
+        fill: CARD,
+        hover: HOVER,
+        border: Some((BORDER, BORDER_HOVER)),
+        text: INK,
+        icon: icon.map_or(INK, |(_, c)| c),
+    };
+    icon_button_with_text(ui, text, icon.map(|(i, _)| i), None, look, full_width)
+}
+
+/// A square outlined icon button (settings, back).
+pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    painter.rect_filled(rect, R_CONTROL, if hovered { HOVER } else { CARD });
+    painter.rect_stroke(
+        rect,
+        R_CONTROL,
+        Stroke::new(1.0_f32, if hovered { BORDER_HOVER } else { BORDER }),
+        StrokeKind::Inside,
+    );
+    draw_icon(
+        painter,
+        icon,
+        rect.center(),
+        if hovered { INK } else { INK_SECONDARY },
+    );
     response
         .on_hover_text(tooltip)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A small check mark.
-pub fn check_mark(ui: &mut Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-    let c = rect.center();
-    let stroke = Stroke::new(1.8_f32, color);
-    ui.painter()
-        .line_segment([c + vec2(-4.5, 0.5), c + vec2(-1.5, 3.5)], stroke);
-    ui.painter()
-        .line_segment([c + vec2(-1.5, 3.5), c + vec2(4.5, -3.5)], stroke);
+/// A small round close button for dismissible cards.
+pub fn close_button(ui: &mut Ui, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().circle_filled(rect.center(), 13.0, TRACK);
+    }
+    draw_icon(
+        ui.painter(),
+        Icon::Close,
+        rect.center(),
+        if hovered { INK } else { INK_MUTED },
+    );
+    response
+        .on_hover_text(tooltip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A blue text link with a trailing arrow ("Усі записи →").
+pub fn link(ui: &mut Ui, text: &str) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), FontId::new(14.0, medium()), BLUE);
+    let size = vec2(galley.size().x + 22.0, 26.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let color = if response.hovered() { BLUE_HOVER } else { BLUE };
+    let text_w = galley.size().x;
+    let painter = ui.painter();
+    painter.galley(
+        pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    let shift = if response.hovered() { 2.0 } else { 0.0 };
+    draw_icon(
+        painter,
+        Icon::Arrow,
+        pos2(rect.left() + text_w + 13.0 + shift, rect.center().y),
+        color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A round pastel tile with an icon, like the avatars in the web app's lists.
+pub fn icon_tile(ui: &mut Ui, icon: Icon, tone: Tone) {
+    let (bg, fg) = tone.colors();
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+    ui.painter().circle_filled(rect.center(), 18.0, bg);
+    draw_icon(ui.painter(), icon, rect.center(), fg);
+}
+
+/// A thin level bar: 0 dBFS full, −60 dBFS empty. `None` = idle.
+pub fn meter(ui: &mut Ui, peak: Option<f32>) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3, TRACK);
+    let Some(db) = peak.map(to_db) else {
+        return;
+    };
+    let fraction = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    if fraction <= 0.0 {
+        return;
+    }
+    let color = if db > -1.0 {
+        RED
+    } else if db > -6.0 {
+        AMBER
+    } else {
+        BLUE
+    };
+    let mut fill = rect;
+    fill.set_width((rect.width() * fraction).max(6.0));
+    painter.rect_filled(fill, 3, color);
+}
+
+pub fn to_db(peak: f32) -> f32 {
+    if peak > 0.0 {
+        20.0 * peak.log10()
+    } else {
+        -120.0
+    }
+}
+
+/// A segmented control; returns true when the selection changed.
+pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
+    let height = 38.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    ui.painter().rect_filled(rect, R_CONTROL + 1, TRACK);
+    let w = (rect.width() - 6.0) / options.len() as f32;
+    let mut changed = false;
+    for (i, (option, label)) in options.iter().enumerate() {
+        let seg = Rect::from_min_size(
+            pos2(rect.left() + 3.0 + i as f32 * w, rect.top() + 3.0),
+            vec2(w, height - 6.0),
+        );
+        let response = ui.interact(seg, ui.id().with(("segment", i)), Sense::click());
+        let selected = *value == *option;
+        if selected {
+            let painter = ui.painter();
+            painter.add(
+                Shadow {
+                    offset: [0, 1],
+                    blur: 4,
+                    spread: 0,
+                    color: Color32::from_rgba_unmultiplied(16, 36, 72, 24),
+                }
+                .as_shape(seg, R_CONTROL - 2),
+            );
+            painter.rect_filled(seg, R_CONTROL - 2, CARD);
+        }
+        let font = if selected {
+            FontId::new(13.5, medium())
+        } else {
+            FontId::proportional(13.5)
+        };
+        let color = if selected || response.hovered() {
+            INK
+        } else {
+            INK_SECONDARY
+        };
+        ui.painter()
+            .text(seg.center(), Align2::CENTER_CENTER, *label, font, color);
+        if response.clicked() && !selected {
+            *value = *option;
+            changed = true;
+        }
+        response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    changed
+}
+
+/// An iOS-style switch in the brand blue.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(40.0, 24.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.15);
+    let off = Color32::from_rgb(0xd3, 0xd9, 0xe2);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12, egui::lerp(egui::Rgba::from(off)..=BLUE.into(), t));
+    let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, t);
+    painter.circle_filled(pos2(x, rect.center().y), 9.5, Color32::WHITE);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A hairline between groups inside a card.
+pub fn divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0_f32, HAIRLINE),
+    );
+}
+
+/// The card frame for modal dialogs.
+pub fn modal_frame() -> egui::Frame {
+    card_frame().inner_margin(Margin::same(22)).shadow(Shadow {
+        offset: [0, 16],
+        blur: 40,
+        spread: 0,
+        color: Color32::from_rgba_unmultiplied(16, 36, 72, 46),
+    })
 }

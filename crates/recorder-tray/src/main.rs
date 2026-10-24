@@ -57,7 +57,6 @@ struct DevOptions {
     screenshot: Option<PathBuf>,
     screenshot_at: Option<f32>,
     view: Option<View>,
-    theme: Option<egui::Theme>,
     window_height: Option<f32>,
 }
 
@@ -87,9 +86,6 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, dev: DevOptions) -> Self {
         ui::install(&cc.egui_ctx);
-        if let Some(theme) = dev.theme {
-            cc.egui_ctx.set_theme(theme);
-        }
         let (px, w, h) = assets::decode(assets::LOGO_PNG);
         let logo = cc.egui_ctx.load_texture(
             "logo",
@@ -160,42 +156,49 @@ impl App {
         if self.permissions.iter().all(|(_, a)| *a == Access::Granted) {
             return;
         }
-        let p = ui::palette(ui);
         let asking = self.asking.load(Ordering::SeqCst);
+        let granted = self
+            .permissions
+            .iter()
+            .filter(|(_, a)| *a == Access::Granted)
+            .count();
+        let total = self.permissions.len();
         let mut request = None;
         ui::card(ui, |ui| {
-            ui::eyebrow(ui, "Потрібні дозволи");
-            ui.label(
-                RichText::new("Щоб записувати ваш голос і голоси співрозмовників.")
-                    .color(p.ink_muted)
-                    .size(12.5),
-            );
-            ui.add_space(ui::S1);
+            ui::card_header(ui, "Потрібні дозволи", |ui| {
+                ui::pill(ui, &format!("{granted} з {total}"), ui::Tone::Amber, false);
+            });
+            ui.label(ui::muted(
+                "Щоб записувати ваш голос і голоси співрозмовників.",
+            ));
+            ui.add_space(ui::S2);
             for (perm, access) in self.permissions.clone() {
                 ui.horizontal(|ui| {
-                    ui.set_min_height(30.0);
-                    ui.label(RichText::new(perm.title()).color(p.ink));
+                    let icon = match perm {
+                        Permission::Microphone => ui::Icon::Mic,
+                        Permission::SystemAudio => ui::Icon::Speaker,
+                    };
+                    let tone = if access == Access::Granted {
+                        ui::Tone::Green
+                    } else {
+                        ui::Tone::Blue
+                    };
+                    ui::icon_tile(ui, icon, tone);
+                    ui.label(RichText::new(perm.title()).font(FontId::new(14.0, ui::medium())));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| match access {
                         Access::Granted => {
-                            ui.label(RichText::new("Дозволено").color(p.signal));
-                            ui::check_mark(ui, p.signal);
+                            ui::pill(ui, "Дозволено", ui::Tone::Green, false);
+                        }
+                        Access::NotAsked if asking => {
+                            ui::pill(ui, "Чекаю відповіді…", ui::Tone::Grey, false);
                         }
                         Access::NotAsked => {
-                            let label = if asking {
-                                "Чекаю відповіді…"
-                            } else {
-                                "Дозволити"
-                            };
-                            let button =
-                                egui::Button::new(RichText::new(label).color(egui::Color32::WHITE))
-                                    .fill(p.brand)
-                                    .min_size(vec2(0.0, 28.0));
-                            if ui.add_enabled(!asking, button).clicked() {
+                            if ui::primary(ui, "Дозволити", None, None, false).clicked() {
                                 request = Some(perm);
                             }
                         }
                         Access::Denied => {
-                            if ui::button(ui, "Увімкнути").clicked() {
+                            if ui::outline(ui, "Увімкнути", None, false).clicked() {
                                 permissions::open_settings(perm);
                             }
                         }
@@ -203,13 +206,10 @@ impl App {
                 });
             }
             if self.permissions.iter().any(|(_, a)| *a == Access::Denied) {
-                ui.label(
-                    RichText::new(
-                        "Доступ було відхилено, тому macOS більше не питає. «Увімкнути» відкриє потрібний розділ налаштувань: увімкніть перемикач навпроти Meeting Recorder — програма побачить це одразу.",
-                    )
-                    .color(p.ink_muted)
-                    .size(12.5),
-                );
+                ui.add_space(ui::S1);
+                ui.label(ui::muted(
+                    "Доступ було відхилено, тому macOS більше не питає. «Увімкнути» відкриє потрібний розділ налаштувань: увімкніть перемикач навпроти Meeting Recorder — програма побачить це одразу.",
+                ));
             }
         });
         ui.add_space(ui::S3);
@@ -384,14 +384,13 @@ impl App {
     // ── Main screen ────────────────────────────────────────────────────
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        let p = ui::palette(ui);
         ui.horizontal(|ui| {
-            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(26.0, 26.0)));
+            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(32.0, 32.0)));
             ui.add_space(ui::S1);
             ui.label(
                 RichText::new(APP_NAME)
-                    .font(FontId::new(15.0, ui::semibold()))
-                    .color(p.ink),
+                    .font(FontId::new(18.0, ui::bold()))
+                    .color(ui::INK),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui::icon_button(ui, ui::Icon::Settings, "Налаштування").clicked() {
@@ -401,66 +400,87 @@ impl App {
         });
     }
 
+    /// The main card: status, the timer and the one action.
     fn transport(&mut self, ui: &mut egui::Ui) {
-        let p = ui::palette(ui);
         let st = self.status.clone();
-        ui.vertical_centered(|ui| {
-            let (lamp, caption) = match &st {
-                None => (p.ink_muted, "Готово до запису".to_string()),
-                Some(s) => (p.rec, format!("Запис · частина {}", s.part)),
-            };
-            ui.horizontal(|ui| {
-                // Centre "● CAPTION" as one unit.
-                let text = RichText::new(caption.to_uppercase())
-                    .font(FontId::new(11.0, ui::semibold()))
-                    .color(lamp)
-                    .extra_letter_spacing(0.8);
-                let galley = egui::WidgetText::from(text.clone()).into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
-                    egui::TextStyle::Body,
-                );
-                let width = 8.0 + ui::S2 + galley.size().x;
-                ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-                let (dot, _) = ui.allocate_exact_size(vec2(8.0, 14.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 4.0, lamp);
-                ui.label(text);
+        ui::card(ui, |ui| {
+            ui::card_header(ui, "Запис дзвінка", |ui| match &st {
+                None => {
+                    ui::pill(ui, "Готово", ui::Tone::Blue, false);
+                }
+                Some(s) => {
+                    ui::pill(ui, "Іде запис", ui::Tone::Red, true);
+                    if s.part > 1 {
+                        ui::pill(ui, &format!("Частина {}", s.part), ui::Tone::Grey, false);
+                    }
+                }
             });
+            ui.add_space(ui::S2);
+            ui.label(ui::caption("Тривалість"));
             let elapsed = st.as_ref().map_or(0, |s| s.elapsed_ms / 1000);
             ui.label(
                 RichText::new(hms(elapsed))
-                    .font(FontId::monospace(40.0))
-                    .color(if st.is_some() { p.ink } else { p.ink_secondary }),
+                    .font(FontId::new(42.0, ui::bold()))
+                    .color(if st.is_some() { ui::INK } else { ui::INK_MUTED }),
             );
             ui.add_space(ui::S3);
-            if ui::record_button(ui, st.is_some()).clicked() {
+            let clicked = if st.is_some() {
+                ui::outline(ui, "Зупинити запис", Some((ui::Icon::Stop, ui::RED)), true)
+            } else {
+                ui::primary(ui, "Почати запис", Some(ui::Icon::Record), None, true)
+            }
+            .clicked();
+            if clicked {
                 if st.is_some() {
                     self.stop();
                 } else {
                     self.start();
                 }
             }
-            ui.add_space(ui::S1);
-            ui.label(
-                RichText::new(if st.is_some() {
-                    "Зупинити запис"
-                } else {
-                    "Почати запис"
-                })
-                .color(p.ink_secondary),
-            );
         });
     }
 
     fn channels(&self, ui: &mut egui::Ui) {
         let levels = self.status.as_ref().map(|s| s.levels);
         ui::card(ui, |ui| {
-            ui::eyebrow(ui, "Канали");
+            ui::card_header(ui, "Канали", |_| {});
             ui.add_space(ui::S1);
-            ui::channel_meter(ui, "Ви", "мікрофон", levels.map(|l| l[0]));
-            ui.add_space(ui::S2);
-            ui::channel_meter(ui, "Співрозмовники", "системний звук", levels.map(|l| l[1]));
+            let rows = [
+                (ui::Icon::Mic, "Ви", "мікрофон", levels.map(|l| l[0])),
+                (
+                    ui::Icon::Speaker,
+                    "Співрозмовники",
+                    "системний звук",
+                    levels.map(|l| l[1]),
+                ),
+            ];
+            for (i, (icon, name, source, peak)) in rows.into_iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(ui::S2);
+                }
+                ui.horizontal(|ui| {
+                    ui::icon_tile(ui, icon, ui::Tone::Blue);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = ui::S1 + 2.0;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(name).font(FontId::new(14.0, ui::medium())));
+                            ui.label(ui::muted(source));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let level = match peak.map(ui::to_db) {
+                                    // A real minus sign, not a hyphen.
+                                    Some(db) if db > -60.0 => {
+                                        format!("{db:.0} дБ").replace('-', "\u{2212}")
+                                    }
+                                    Some(_) => "тиша".to_string(),
+                                    None => "—".to_string(),
+                                };
+                                ui.label(ui::muted(level));
+                            });
+                        });
+                        ui::meter(ui, peak);
+                    });
+                });
+            }
         });
     }
 
@@ -468,46 +488,32 @@ impl App {
         let Some(m) = &self.message else {
             return;
         };
-        let p = ui::palette(ui);
-        let accent = if m.problem { p.caution } else { p.brand };
+        let (icon, tone) = if m.problem {
+            (ui::Icon::Alert, ui::Tone::Amber)
+        } else {
+            (ui::Icon::Info, ui::Tone::Blue)
+        };
         let mut open_pane = None;
         let mut dismiss = false;
-        let frame = egui::Frame::new()
-            .fill(p.card)
-            .stroke(egui::Stroke::new(1.0_f32, p.hairline))
-            .corner_radius(ui::R_CARD)
-            .inner_margin(egui::Margin {
-                left: 18,
-                right: 10,
-                top: 12,
-                bottom: 12,
-            })
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal_top(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        if ui::icon_button(ui, ui::Icon::Close, "Сховати").clicked() {
-                            dismiss = true;
+        ui::card(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui::icon_tile(ui, icon, tone);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if ui::close_button(ui, "Сховати").clicked() {
+                        dismiss = true;
+                    }
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                        ui.add_space(ui::S1);
+                        ui.label(RichText::new(&m.text).color(ui::INK));
+                        if let Some(pane) = m.settings_pane
+                            && ui::link(ui, "Налаштування приватності").clicked()
+                        {
+                            open_pane = Some(pane);
                         }
-                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            ui.label(RichText::new(&m.text).color(p.ink));
-                            if let Some(pane) = m.settings_pane
-                                && ui::link(ui, "Відкрити налаштування приватності").clicked()
-                            {
-                                open_pane = Some(pane);
-                            }
-                        });
                     });
                 });
             });
-        // Accent bar along the left edge, inside the rounded card.
-        let r = frame.response.rect;
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(r.left() + 7.0, r.top() + 12.0),
-            egui::pos2(r.left() + 10.0, r.bottom() - 12.0),
-        );
-        ui.painter()
-            .rect_filled(bar, egui::CornerRadius::same(2), accent);
+        });
         if let Some(pane) = open_pane {
             open_privacy_settings(pane);
         }
@@ -517,32 +523,36 @@ impl App {
     }
 
     fn last_recording(&self, ui: &mut egui::Ui) {
-        let p = ui::palette(ui);
-        let Some(last) = &self.last else {
-            ui.vertical_centered(|ui| {
+        ui::card(ui, |ui| {
+            let Some(last) = &self.last else {
+                ui::card_header(ui, "Записи", |_| {});
+                ui.label(ui::muted("Тут з'явиться останній запис."));
+                ui.add_space(ui::S1);
                 if ui::link(ui, "Відкрити папку записів").clicked() {
                     paths::open_in_file_manager(&self.settings.recordings_dir());
                 }
+                return;
+            };
+            ui::card_header(ui, "Останній запис", |ui| {
+                ui::pill(ui, "Збережено", ui::Tone::Green, false);
             });
-            return;
-        };
-        ui::card(ui, |ui| {
-            ui::eyebrow(ui, "Останній запис");
-            ui.add_space(ui::S1);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(when(last.started)).color(p.ink));
+                ui.label(RichText::new(when(last.started)).color(ui::INK));
                 ui.label(
-                    RichText::new(format!("· {}", duration_words(last.seconds))).color(p.ink_muted),
+                    RichText::new(format!("· {}", duration_words(last.seconds)))
+                        .color(ui::INK_MUTED),
                 );
             });
+            ui.add_space(ui::S2);
             ui.horizontal(|ui| {
-                if ui::link(ui, REVEAL).clicked() {
+                if ui::outline(ui, REVEAL, Some((ui::Icon::Folder, ui::BLUE)), false).clicked() {
                     paths::open_in_file_manager(&last.dir);
                 }
-                ui.label(RichText::new("·").color(p.ink_muted));
-                if ui::link(ui, "Усі записи").clicked() {
-                    paths::open_in_file_manager(&self.settings.recordings_dir());
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui::link(ui, "Усі записи").clicked() {
+                        paths::open_in_file_manager(&self.settings.recordings_dir());
+                    }
+                });
             });
         });
     }
@@ -551,35 +561,53 @@ impl App {
         self.header(ui);
         ui.add_space(ui::S4);
         self.permissions_card(ui);
-        ui.add_space(ui::S2);
         self.transport(ui);
-        ui.add_space(ui::S4 + ui::S1);
-        self.channels(ui);
         ui.add_space(ui::S3);
         self.message(ui);
         if self.message.is_some() {
             ui.add_space(ui::S3);
         }
+        self.channels(ui);
+        ui.add_space(ui::S3);
         self.last_recording(ui);
     }
 
     // ── Settings screen ────────────────────────────────────────────────
 
     fn settings_screen(&mut self, ui: &mut egui::Ui) {
-        let p = ui::palette(ui);
         ui.horizontal(|ui| {
             if ui::icon_button(ui, ui::Icon::Back, "Назад").clicked() {
                 self.view = View::Main;
             }
+            ui.add_space(ui::S1);
             ui.label(
                 RichText::new("Налаштування")
-                    .font(FontId::new(15.0, ui::semibold()))
-                    .color(p.ink),
+                    .font(FontId::new(18.0, ui::bold()))
+                    .color(ui::INK),
             );
         });
-        ui.add_space(ui::S6);
+        ui.add_space(ui::S4);
 
-        ui::eyebrow(ui, "Придушення луни");
+        ui::card(ui, |ui| self.echo_settings(ui));
+        ui.add_space(ui::S3);
+        ui::card(ui, |ui| self.recordings_settings(ui));
+        ui.add_space(ui::S3);
+        ui::card(ui, |ui| {
+            ui::card_header(ui, "Діагностика", |ui| {
+                ui.label(ui::muted(format!("Версія {}", env!("CARGO_PKG_VERSION"))));
+            });
+            ui.label(ui::muted(
+                "Журнали допоможуть розібратися, якщо із записом щось не так.",
+            ));
+            ui.add_space(ui::S1);
+            if ui::link(ui, "Відкрити журнали").clicked() {
+                paths::open_in_file_manager(&paths::log_dir());
+            }
+        });
+    }
+
+    fn echo_settings(&mut self, ui: &mut egui::Ui) {
+        ui::card_header(ui, "Придушення луни", |_| {});
         ui.add_space(ui::S1);
         let changed = ui::segmented(
             ui,
@@ -597,7 +625,7 @@ impl App {
             AecMode::On => "Завжди очищати канал мікрофона від звуку з динаміків.",
             AecMode::Off => "Мікрофон пишеться без обробки. Підходить для навушників.",
         };
-        ui.label(RichText::new(hint).color(p.ink_muted).size(12.5));
+        ui.label(ui::muted(hint));
         if changed {
             self.save_settings();
             if self.recorder.is_some() {
@@ -608,65 +636,48 @@ impl App {
                 });
             }
         }
-        ui.add_space(ui::S6);
+    }
 
-        ui::eyebrow(ui, "Записи");
+    fn recordings_settings(&mut self, ui: &mut egui::Ui) {
+        ui::card_header(ui, "Записи", |_| {});
         ui.add_space(ui::S1);
-        ui::card(ui, |ui| {
-            ui.label(RichText::new("Папка").color(p.ink_secondary).size(12.5));
-            ui.label(RichText::new(tilde(&self.settings.recordings_dir())).color(p.ink));
-            ui.add_space(ui::S2);
-            ui.horizontal(|ui| {
-                if ui::button(ui, "Змінити…").clicked() {
-                    let picked = rfd::FileDialog::new()
-                        .set_title("Папка для записів")
-                        .set_directory(self.settings.recordings_dir())
-                        .pick_folder();
-                    if let Some(dir) = picked {
-                        tracing::info!(dir = %dir.display(), "recordings folder changed");
-                        self.settings.recordings_dir = Some(dir);
-                        self.save_settings();
-                    }
-                }
-                if ui::button(ui, "Відкрити").clicked() {
-                    paths::open_in_file_manager(&self.settings.recordings_dir());
-                }
-            });
-            ui.add_space(ui::S3);
-            ui.separator();
-            ui.add_space(ui::S2);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Нагадувати про згоду").color(p.ink));
-                    ui.label(
-                        RichText::new("Перед кожним записом")
-                            .color(p.ink_muted)
-                            .size(12.5),
-                    );
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let mut remind = !self.settings.consent_reminder_dismissed;
-                    if ui::toggle(ui, &mut remind).changed() {
-                        self.settings.consent_reminder_dismissed = !remind;
-                        self.save_settings();
-                    }
-                });
-            });
-        });
-        ui.add_space(ui::S6);
-
-        ui::eyebrow(ui, "Діагностика");
-        ui.add_space(ui::S1);
+        ui.label(ui::caption("Папка"));
+        ui.label(RichText::new(tilde(&self.settings.recordings_dir())).color(ui::INK));
+        ui.add_space(ui::S2);
         ui.horizontal(|ui| {
-            if ui::link(ui, "Відкрити журнали").clicked() {
-                paths::open_in_file_manager(&paths::log_dir());
+            if ui::outline(ui, "Змінити…", None, false).clicked() {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Папка для записів")
+                    .set_directory(self.settings.recordings_dir())
+                    .pick_folder();
+                if let Some(dir) = picked {
+                    tracing::info!(dir = %dir.display(), "recordings folder changed");
+                    self.settings.recordings_dir = Some(dir);
+                    self.save_settings();
+                }
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui::outline(ui, "Відкрити", Some((ui::Icon::Folder, ui::BLUE)), false).clicked()
+            {
+                paths::open_in_file_manager(&self.settings.recordings_dir());
+            }
+        });
+        ui.add_space(ui::S3);
+        ui::divider(ui);
+        ui.add_space(ui::S3);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.label(
-                    RichText::new(format!("Версія {}", env!("CARGO_PKG_VERSION")))
-                        .color(p.ink_muted)
-                        .size(12.5),
+                    RichText::new("Нагадувати про згоду").font(FontId::new(14.0, ui::medium())),
                 );
+                ui.label(ui::muted("Перед кожним записом"));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let mut remind = !self.settings.consent_reminder_dismissed;
+                if ui::toggle(ui, &mut remind).changed() {
+                    self.settings.consent_reminder_dismissed = !remind;
+                    self.save_settings();
+                }
             });
         });
     }
@@ -679,28 +690,24 @@ impl App {
         }
         let mut start = false;
         let response = egui::Modal::new(egui::Id::new("consent"))
-            .frame(modal_frame(ctx))
+            .frame(ui::modal_frame())
             .show(ctx, |ui| {
-                let p = ui::palette(ui);
                 ui.set_width(296.0);
-                ui.label(
-                    RichText::new("Перед записом")
-                        .font(FontId::new(16.0, ui::semibold()))
-                        .color(p.ink),
-                );
-                ui.add_space(ui::S1);
-                ui.label(RichText::new(CONSENT_REMINDER).color(p.ink_secondary));
+                modal_title(ui, "Перед записом");
+                ui.label(RichText::new(CONSENT_REMINDER).color(ui::INK_SECONDARY));
                 ui.add_space(ui::S3);
                 ui.horizontal(|ui| {
                     ui::toggle(ui, &mut self.consent_dont_ask);
-                    ui.label(RichText::new("Більше не нагадувати").color(p.ink_secondary));
+                    ui.label(RichText::new("Більше не нагадувати").color(ui::INK_SECONDARY));
                 });
                 ui.add_space(ui::S4);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(primary_button(p, "Почати запис")).clicked() {
+                    if ui::primary(ui, "Почати запис", Some(ui::Icon::Record), None, false)
+                        .clicked()
+                    {
                         start = true;
                     }
-                    if ui::button(ui, "Скасувати").clicked() {
+                    if ui::outline(ui, "Скасувати", None, false).clicked() {
                         self.show_consent = false;
                     }
                 });
@@ -724,28 +731,23 @@ impl App {
         }
         let mut close = false;
         let response = egui::Modal::new(egui::Id::new("close"))
-            .frame(modal_frame(ctx))
+            .frame(ui::modal_frame())
             .show(ctx, |ui| {
-                let p = ui::palette(ui);
                 ui.set_width(296.0);
-                ui.label(
-                    RichText::new("Іде запис")
-                        .font(FontId::new(16.0, ui::semibold()))
-                        .color(p.ink),
-                );
-                ui.add_space(ui::S1);
+                modal_title(ui, "Іде запис");
                 ui.label(
                     RichText::new(
                         "Зупинити запис і закрити програму? Усе записане буде збережено.",
                     )
-                    .color(p.ink_secondary),
+                    .color(ui::INK_SECONDARY),
                 );
                 ui.add_space(ui::S4);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(primary_button(p, "Зупинити й закрити")).clicked() {
+                    if ui::primary(ui, "Зупинити й закрити", None, None, false).clicked()
+                    {
                         close = true;
                     }
-                    if ui::button(ui, "Продовжити запис").clicked() {
+                    if ui::outline(ui, "Продовжити", None, false).clicked() {
                         self.confirm_close = false;
                     }
                 });
@@ -773,11 +775,12 @@ impl eframe::App for App {
             self.title = title;
         }
 
+        ui::backdrop(ctx);
         egui::TopBottomPanel::bottom("footer")
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
+                    .fill(ui::CANVAS)
                     .inner_margin(egui::Margin {
                         left: 24,
                         right: 24,
@@ -786,33 +789,31 @@ impl eframe::App for App {
                     }),
             )
             .show(ctx, |ui| {
-                let p = ui::palette(ui);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new(CONSENT_REMINDER)
-                            .color(p.ink_muted)
+                            .color(ui::INK_MUTED)
                             .size(11.0),
                     );
                 });
             });
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(egui::Margin {
-                        left: 20,
-                        right: 12,
-                        top: 16,
-                        bottom: 8,
-                    }),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin {
+                left: 14,
+                right: 6,
+                top: 14,
+                bottom: 4,
+            }))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    // An 8 px gutter on the right holds the floating scroll bar.
+                    // Room for the card shadows; the wider right side holds
+                    // the floating scroll bar.
                     egui::Frame::new()
                         .inner_margin(egui::Margin {
-                            right: 8,
-                            ..Default::default()
+                            left: 6,
+                            right: 10,
+                            top: 4,
+                            bottom: 12,
                         })
                         .show(ui, |ui| match self.view {
                             View::Main => self.main_screen(ui),
@@ -841,16 +842,13 @@ impl Drop for App {
     }
 }
 
-fn modal_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::popup(&ctx.style())
-        .inner_margin(20)
-        .corner_radius(ui::R_CARD + 2)
-}
-
-fn primary_button(p: ui::Palette, text: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(text).color(egui::Color32::WHITE))
-        .fill(p.rec)
-        .min_size(vec2(0.0, 30.0))
+fn modal_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .font(FontId::new(17.0, ui::bold()))
+            .color(ui::INK),
+    );
+    ui.add_space(ui::S1);
 }
 
 fn current_permissions() -> Vec<(Permission, Access)> {
@@ -959,11 +957,6 @@ fn dev_options() -> DevOptions {
         screenshot_at: value("--screenshot-at").and_then(|v| v.parse().ok()),
         view: value("--view").and_then(|v| (v == "settings").then_some(View::Settings)),
         window_height: value("--window-height").and_then(|v| v.parse().ok()),
-        theme: value("--theme").and_then(|v| match v.as_str() {
-            "light" => Some(egui::Theme::Light),
-            "dark" => Some(egui::Theme::Dark),
-            _ => None,
-        }),
     }
 }
 
