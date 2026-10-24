@@ -297,6 +297,7 @@ pub fn pill(ui: &mut Ui, text: &str, tone: Tone, dot: bool) -> Response {
 #[derive(Clone, Copy)]
 pub enum Icon {
     Record,
+    Pause,
     Stop,
     Arrow,
     Back,
@@ -317,6 +318,15 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
     match icon {
         Icon::Record => {
             painter.circle_filled(c, 5.5, color);
+        }
+        Icon::Pause => {
+            for dx in [-3.0, 3.0] {
+                painter.rect_filled(
+                    Rect::from_center_size(c + vec2(dx, 0.0), vec2(3.5, 11.0)),
+                    1,
+                    color,
+                );
+            }
         }
         Icon::Stop => {
             painter.rect_filled(Rect::from_center_size(c, Vec2::splat(10.0)), 2, color);

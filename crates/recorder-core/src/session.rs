@@ -185,12 +185,12 @@ impl SessionWriter {
         Ok(())
     }
 
-    /// Closes the current part after a pause of `paused_ms` (system sleep).
-    /// The next frame starts a new part; the pause is recorded as an event.
-    pub fn pause(&mut self, paused_ms: u64) -> io::Result<()> {
+    /// Closes the current part after a gap of `paused_ms`. The next frame
+    /// starts a new part; the gap is recorded as a `sleep` or `pause` event.
+    pub fn pause(&mut self, gap: Gap, paused_ms: u64) -> io::Result<()> {
         self.close_part(None)?;
         self.paused_ms += paused_ms;
-        self.event("sleep", serde_json::json!({ "duration_ms": paused_ms }))
+        self.event(gap.event(), serde_json::json!({ "duration_ms": paused_ms }))
     }
 
     pub fn finish(mut self) -> io::Result<Manifest> {
@@ -203,6 +203,24 @@ impl SessionWriter {
         }
         let _ = fs::remove_file(self.dir.join(LOCK_FILE));
         Ok(self.manifest)
+    }
+}
+
+/// Why the recording has a gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gap {
+    /// The computer slept.
+    Sleep,
+    /// The user paused the recording.
+    Pause,
+}
+
+impl Gap {
+    fn event(self) -> &'static str {
+        match self {
+            Gap::Sleep => "sleep",
+            Gap::Pause => "pause",
+        }
     }
 }
 

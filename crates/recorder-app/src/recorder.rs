@@ -17,7 +17,7 @@ use recorder_core::engine::{DEFAULT_LATENCY_MS, Engine};
 use recorder_core::manifest::{Manifest, OsInfo};
 use recorder_core::opus_ogg::EncoderConfig;
 use recorder_core::recovery::{self, Recovered};
-use recorder_core::session::{SessionConfig, SessionWriter};
+use recorder_core::session::{Gap, SessionConfig, SessionWriter};
 use recorder_core::{MIC, SYSTEM};
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +95,8 @@ pub struct Status {
     /// Smoothed peak level per channel, 0.0..=1.0.
     pub levels: [f32; 2],
     pub part: u32,
+    /// The user paused the recording; nothing is written until resumed.
+    pub paused: bool,
     pub system_capture: String,
     pub aec_on: bool,
     pub mic_device: Option<String>,
@@ -103,6 +105,7 @@ pub struct Status {
 
 pub struct Recorder {
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
     notices: Receiver<Notice>,
     thread: Option<JoinHandle<Result<Manifest>>>,
@@ -133,12 +136,13 @@ impl Recorder {
             ..Default::default()
         }));
         let stop = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (stop, status) = (stop.clone(), status.clone());
+            let (stop, pause, status) = (stop.clone(), pause.clone(), status.clone());
             std::thread::Builder::new()
                 .name("recorder".into())
                 .spawn(move || {
-                    let result = run(session, opts, stop, status.clone(), notice_tx);
+                    let result = run(session, opts, stop, pause, status.clone(), notice_tx);
                     status.lock().expect("status").running = false;
                     if let Err(e) = &result {
                         tracing::error!(error = %e, "recording thread failed");
@@ -149,6 +153,7 @@ impl Recorder {
         };
         Ok(Self {
             stop,
+            pause,
             status,
             notices,
             thread: Some(thread),
@@ -157,6 +162,13 @@ impl Recorder {
 
     pub fn status(&self) -> Status {
         self.status.lock().expect("status").clone()
+    }
+
+    /// Pauses or resumes. Capture keeps running, but nothing is written
+    /// while paused; the recording continues in a new part, and the paused
+    /// time is not filled with silence.
+    pub fn set_paused(&self, paused: bool) {
+        self.pause.store(paused, Ordering::SeqCst);
     }
 
     pub fn try_notice(&self) -> Option<Notice> {
@@ -237,6 +249,11 @@ fn drain(engine: &mut Engine, consumer: &mut BlockConsumer, channel: usize, buf:
     }
 }
 
+/// Throws captured audio away (while paused).
+fn discard(consumer: &mut BlockConsumer, buf: &mut Vec<f32>) {
+    while consumer.pop(buf).is_some() {}
+}
+
 /// Output device kind → echo-risk bookkeeping and automatic AEC.
 fn apply_output(engine: &mut Engine, mode: AecMode, notices: &Sender<Notice>, announce: bool) {
     let out = output::default_output();
@@ -281,6 +298,7 @@ fn run(
     mut session: SessionWriter,
     opts: RecorderOptions,
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
     notices: Sender<Notice>,
 ) -> Result<Manifest> {
@@ -330,8 +348,57 @@ fn run(
     let mut last_wall = SystemTime::now();
     let mut last_host = host_now_ns();
     let mut write_error = None;
+    // When the user paused, and the last host time before that.
+    let mut paused_at: Option<(Instant, u64)> = None;
 
     while !stop.load(Ordering::SeqCst) {
+        match (pause.load(Ordering::SeqCst), paused_at) {
+            (true, None) => {
+                // Everything captured so far stays; the uncommitted tail is
+                // written on resume or stop.
+                drain(&mut engine, &mut mic_c, MIC, &mut buf);
+                drain(&mut engine, &mut sys_c, SYSTEM, &mut buf);
+                paused_at = Some((Instant::now(), host_now_ns()));
+                levels = [0.0; 2];
+                let mut st = status.lock().expect("status");
+                st.paused = true;
+                st.levels = levels;
+                tracing::info!(elapsed_ms = st.elapsed_ms, "paused");
+            }
+            (false, Some((since, before))) => {
+                discard(&mut mic_c, &mut buf);
+                discard(&mut sys_c, &mut buf);
+                let paused_ms = since.elapsed().as_millis() as u64;
+                tracing::info!(paused_s = paused_ms / 1000, "resumed, starting a new part");
+                if let Err(e) =
+                    engine.resume_after_pause(Gap::Pause, before, host_now_ns(), paused_ms)
+                {
+                    write_error = Some(e);
+                    break;
+                }
+                paused_at = None;
+                // Silence during the pause says nothing about the call.
+                if let Some(t) = &mut states[SYSTEM].last_sound {
+                    *t = Instant::now();
+                }
+                status.lock().expect("status").paused = false;
+            }
+            _ => {}
+        }
+        if paused_at.is_some() {
+            // Devices may still change while paused; the sleep check is
+            // skipped because the pause already starts a new part.
+            while let Ok(ev) = ev_rx.try_recv() {
+                handle_event(&mut engine, &mut states, &opts, &notices, &status, ev);
+            }
+            discard(&mut mic_c, &mut buf);
+            discard(&mut sys_c, &mut buf);
+            last_wall = SystemTime::now();
+            last_host = host_now_ns();
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+
         // A long gap in wall time means the computer slept (or the process
         // was suspended): continue in a new part without recording the gap.
         let wall = SystemTime::now();
@@ -343,9 +410,12 @@ fn run(
                 seconds = gap.as_secs(),
                 "system was asleep, starting a new part"
             );
-            if let Err(e) =
-                engine.resume_after_pause(last_host, host_now_ns(), gap.as_millis() as u64)
-            {
+            if let Err(e) = engine.resume_after_pause(
+                Gap::Sleep,
+                last_host,
+                host_now_ns(),
+                gap.as_millis() as u64,
+            ) {
                 write_error = Some(e);
                 break;
             }
@@ -414,8 +484,13 @@ fn run(
     if let Some((h, _)) = system {
         h.stop();
     }
-    drain(&mut engine, &mut mic_c, MIC, &mut buf);
-    drain(&mut engine, &mut sys_c, SYSTEM, &mut buf);
+    if paused_at.is_some() {
+        discard(&mut mic_c, &mut buf);
+        discard(&mut sys_c, &mut buf);
+    } else {
+        drain(&mut engine, &mut mic_c, MIC, &mut buf);
+        drain(&mut engine, &mut sys_c, SYSTEM, &mut buf);
+    }
     log_stats(&engine, &mic_c, &sys_c, &mut last_proc);
     if let Some(e) = &write_error {
         tracing::error!(error = %e, "write failed, stopping");

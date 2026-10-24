@@ -11,7 +11,7 @@ use recorder_core::decode::{decode_part, rms_dbfs};
 use recorder_core::engine::Engine;
 use recorder_core::manifest::{Manifest, OsInfo, PartStatus, Status};
 use recorder_core::opus_ogg::EncoderConfig;
-use recorder_core::session::{SessionConfig, SessionWriter};
+use recorder_core::session::{Gap, SessionConfig, SessionWriter};
 use recorder_core::{MIC, SYSTEM, recovery};
 
 fn temp_root(name: &str) -> PathBuf {
@@ -487,7 +487,17 @@ fn echo_from_speakers_is_removed_when_aec_is_on() {
 /// not filled with silence, even if the host clock kept running.
 #[test]
 fn sleep_starts_a_new_part_without_recording_the_gap() {
-    let root = temp_root("sleep");
+    gap_starts_a_new_part(Gap::Sleep, "sleep");
+}
+
+/// A user pause works the same way, with its own event in the manifest.
+#[test]
+fn pause_starts_a_new_part_without_recording_the_gap() {
+    gap_starts_a_new_part(Gap::Pause, "pause");
+}
+
+fn gap_starts_a_new_part(gap: Gap, event: &str) {
+    let root = temp_root(event);
     let mut engine = new_engine(&root, 600);
     let dir = engine.session().dir().to_path_buf();
     let block = |engine: &mut Engine, t: f64| {
@@ -504,7 +514,7 @@ fn sleep_starts_a_new_part_without_recording_the_gap() {
     let before = t;
     t += 60.0;
     engine
-        .resume_after_pause((before * 1e9) as u64, (t * 1e9) as u64, 60_000)
+        .resume_after_pause(gap, (before * 1e9) as u64, (t * 1e9) as u64, 60_000)
         .unwrap();
     let resume = t;
     while t < resume + 2.0 {
@@ -519,7 +529,7 @@ fn sleep_starts_a_new_part_without_recording_the_gap() {
         total < 6_000,
         "recorded {total} ms, the sleep must not be recorded"
     );
-    assert!(m.events.iter().any(|e| e.kind == "sleep"));
+    assert!(m.events.iter().any(|e| e.kind == event));
     let gap = m.parts[1].started_at_utc.unwrap() - m.parts[0].started_at_utc.unwrap();
     assert!(
         gap.num_seconds() >= 62,
@@ -529,5 +539,29 @@ fn sleep_starts_a_new_part_without_recording_the_gap() {
     // Audio right after the resume point is the tone, not silence.
     let p2 = (m.parts[1].start_offset_ms * 16) as usize;
     assert!(rms_dbfs(&l[p2 + 8_000..p2 + 16_000]) > -15.0);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Stopping while paused keeps what was recorded before the pause and adds
+/// nothing for the paused time.
+#[test]
+fn stop_while_paused_ends_at_the_pause() {
+    let root = temp_root("stop-paused");
+    let mut engine = new_engine(&root, 600);
+    let mut t = 0.0;
+    while t < 3.0 {
+        let samples: Vec<f32> = (0..480).map(|i| sine300(t + i as f64 / 48_000.0)).collect();
+        engine.ingest(MIC, (t * 1e9) as u64, 48_000, &samples);
+        t += 0.01;
+        engine.tick((t * 1e9) as u64).unwrap();
+    }
+    // Paused for 20 s: nothing is ingested or committed, then the user stops.
+    t += 20.0;
+    let m = engine.finish((t * 1e9) as u64).unwrap();
+    let total: u64 = m.parts.iter().map(|p| p.duration_ms).sum();
+    assert!(
+        (2_980..=3_040).contains(&total),
+        "recorded {total} ms for 3 s of audio"
+    );
     std::fs::remove_dir_all(root).ok();
 }

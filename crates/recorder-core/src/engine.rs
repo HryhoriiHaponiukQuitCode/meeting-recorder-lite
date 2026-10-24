@@ -7,7 +7,7 @@ use std::io;
 
 use crate::aec::{self, EchoCanceller};
 use crate::manifest::Manifest;
-use crate::session::SessionWriter;
+use crate::session::{Gap, SessionWriter};
 use crate::track::{Track, TrackStats};
 use crate::{CHANNELS, FRAME_SAMPLES, MIC, SYSTEM, ns_to_frames};
 
@@ -57,12 +57,14 @@ impl Engine {
         self.aec.is_some()
     }
 
-    /// Call after the system slept for `paused_ms`. Commits what was captured
-    /// before `before_ns` (the last host time seen before the sleep), closes
-    /// the part and re-anchors the timeline at `now_ns`, so the sleep is not
-    /// recorded as silence even on hosts whose clock keeps running.
+    /// Call after a gap of `paused_ms` (system sleep or a user pause) during
+    /// which nothing was ingested. Commits what was captured before
+    /// `before_ns` (the last host time before the gap), closes the part and
+    /// re-anchors the timeline at `now_ns`, so the gap is not recorded as
+    /// silence even on hosts whose clock keeps running.
     pub fn resume_after_pause(
         &mut self,
+        gap: Gap,
         before_ns: u64,
         now_ns: u64,
         paused_ms: u64,
@@ -71,7 +73,7 @@ impl Engine {
         let captured = self.tracks.iter().map(Track::end_pos).max().unwrap_or(0) as f64;
         let frame = FRAME_SAMPLES as f64;
         self.commit_until((captured.min(before) / frame).ceil() * frame)?;
-        self.session.pause(paused_ms)?;
+        self.session.pause(gap, paused_ms)?;
         self.tracks = [Track::new(), Track::new()];
         if self.aec.is_some() {
             self.aec = Some(EchoCanceller::new());

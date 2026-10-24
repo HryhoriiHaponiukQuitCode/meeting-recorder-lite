@@ -54,6 +54,8 @@ struct LastRecording {
 #[derive(Default)]
 struct DevOptions {
     smoke_test: Option<u64>,
+    /// `--smoke-pause 2:5`: pause the smoke test at 2 s, resume at 5 s.
+    smoke_pause: Option<(f32, f32)>,
     screenshot: Option<PathBuf>,
     screenshot_at: Option<f32>,
     view: Option<View>,
@@ -75,6 +77,7 @@ struct App {
     title: String,
     started: Instant,
     smoke_until: Option<Instant>,
+    smoke_pause: Option<(f32, f32)>,
     screenshot: Option<(PathBuf, f32)>,
     /// Privacy permissions and when they were last checked.
     permissions: Vec<(Permission, Access)>,
@@ -107,6 +110,7 @@ impl App {
             title: APP_NAME.to_string(),
             started: Instant::now(),
             smoke_until: None,
+            smoke_pause: dev.smoke_pause,
             screenshot: dev
                 .screenshot
                 .map(|p| (p, dev.screenshot_at.unwrap_or(2.0))),
@@ -257,6 +261,14 @@ impl App {
         }
     }
 
+    fn set_paused(&mut self, paused: bool) {
+        if let (Some(r), Some(st)) = (&self.recorder, &mut self.status) {
+            r.set_paused(paused);
+            // Shown at once; the recorder confirms on its next status update.
+            st.paused = paused;
+        }
+    }
+
     fn stop(&mut self) {
         let Some(r) = self.recorder.take() else {
             return;
@@ -342,6 +354,16 @@ impl App {
                 self.stop();
             }
         }
+        if let Some((pause_at, resume_at)) = self.smoke_pause {
+            let t = self.started.elapsed().as_secs_f32();
+            let paused = self.status.as_ref().is_some_and(|s| s.paused);
+            if t >= resume_at {
+                self.smoke_pause = None;
+                self.set_paused(false);
+            } else if t >= pause_at && !paused {
+                self.set_paused(true);
+            }
+        }
         if self.smoke_until.is_some_and(|t| Instant::now() >= t) {
             self.smoke_until = None;
             self.stop();
@@ -409,7 +431,11 @@ impl App {
                     ui::pill(ui, "Готово", ui::Tone::Blue, false);
                 }
                 Some(s) => {
-                    ui::pill(ui, "Іде запис", ui::Tone::Red, true);
+                    if s.paused {
+                        ui::pill(ui, "Пауза", ui::Tone::Amber, false);
+                    } else {
+                        ui::pill(ui, "Іде запис", ui::Tone::Red, true);
+                    }
                     if s.part > 1 {
                         ui::pill(ui, &format!("Частина {}", s.part), ui::Tone::Grey, false);
                     }
@@ -421,21 +447,53 @@ impl App {
             ui.label(
                 RichText::new(hms(elapsed))
                     .font(FontId::new(42.0, ui::bold()))
-                    .color(if st.is_some() { ui::INK } else { ui::INK_MUTED }),
+                    .color(match &st {
+                        Some(s) if !s.paused => ui::INK,
+                        Some(_) => ui::INK_SECONDARY,
+                        None => ui::INK_MUTED,
+                    }),
             );
             ui.add_space(ui::S3);
-            let clicked = if st.is_some() {
-                ui::outline(ui, "Зупинити запис", Some((ui::Icon::Stop, ui::RED)), true)
-            } else {
-                ui::primary(ui, "Почати запис", Some(ui::Icon::Record), None, true)
-            }
-            .clicked();
-            if clicked {
-                if st.is_some() {
-                    self.stop();
-                } else {
+            let Some(s) = &st else {
+                if ui::primary(ui, "Почати запис", Some(ui::Icon::Record), None, true).clicked()
+                {
                     self.start();
                 }
+                return;
+            };
+            let paused = s.paused;
+            let (mut toggle, mut stop) = (false, false);
+            ui.columns(2, |cols| {
+                toggle = if paused {
+                    ui::primary(
+                        &mut cols[0],
+                        "Продовжити",
+                        Some(ui::Icon::Record),
+                        None,
+                        true,
+                    )
+                } else {
+                    ui::outline(
+                        &mut cols[0],
+                        "Пауза",
+                        Some((ui::Icon::Pause, ui::INK)),
+                        true,
+                    )
+                }
+                .clicked();
+                stop = ui::outline(
+                    &mut cols[1],
+                    "Зупинити",
+                    Some((ui::Icon::Stop, ui::RED)),
+                    true,
+                )
+                .clicked();
+            });
+            if toggle {
+                self.set_paused(!paused);
+            }
+            if stop {
+                self.stop();
             }
         });
     }
@@ -766,6 +824,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         let title = match &self.status {
+            Some(st) if st.paused => format!("Пауза {} — {APP_NAME}", hms(st.elapsed_ms / 1000)),
             Some(st) => format!("● {} — {APP_NAME}", hms(st.elapsed_ms / 1000)),
             None => APP_NAME.to_string(),
         };
@@ -776,33 +835,12 @@ impl eframe::App for App {
         }
 
         ui::backdrop(ctx);
-        egui::TopBottomPanel::bottom("footer")
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(ui::CANVAS)
-                    .inner_margin(egui::Margin {
-                        left: 24,
-                        right: 24,
-                        top: 4,
-                        bottom: 14,
-                    }),
-            )
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new(CONSENT_REMINDER)
-                            .color(ui::INK_MUTED)
-                            .size(11.0),
-                    );
-                });
-            });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 left: 14,
                 right: 6,
                 top: 14,
-                bottom: 4,
+                bottom: 8,
             }))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -953,6 +991,10 @@ fn dev_options() -> DevOptions {
     };
     DevOptions {
         smoke_test: value("--smoke-test").and_then(|v| v.parse().ok()),
+        smoke_pause: value("--smoke-pause").and_then(|v| {
+            let (a, b) = v.split_once(':')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        }),
         screenshot: value("--screenshot").map(PathBuf::from),
         screenshot_at: value("--screenshot-at").and_then(|v| v.parse().ok()),
         view: value("--view").and_then(|v| (v == "settings").then_some(View::Settings)),
