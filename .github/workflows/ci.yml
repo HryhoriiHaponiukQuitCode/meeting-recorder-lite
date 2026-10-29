@@ -25,9 +25,16 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-packager@0.11.8
+      # install-action has no prebuilt cargo-packager and its cargo-binstall
+      # fallback breaks on the current macOS runner image, so build it once;
+      # rust-cache keeps ~/.cargo/bin for later runs.
+      - name: Install cargo-packager
+        shell: bash
+        run: |
+          if ! cargo packager --version 2>/dev/null | grep -q '0\.11\.8'; then
+            cargo install cargo-packager --version 0.11.8 --locked
+          fi
+          cargo packager --version
       # Static sherpa-onnx + ONNX Runtime for the transcriber (no TTS, no
       # GPL code). Built once per script change, then restored from cache.
       - name: Cache sherpa-onnx
