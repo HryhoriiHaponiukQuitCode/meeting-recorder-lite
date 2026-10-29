@@ -1,0 +1,356 @@
+//! Tests with the real model. They need the model files and test audio, so
+//! they are ignored by default:
+//!
+//! ```sh
+//! MR_MODEL_DIR=.../models \
+//! MR_TEST_EN_WAV=.../english-source.wav MR_TEST_EN_REF=.../english-reference.txt \
+//! MR_TEST_EN_GOLDEN=.../en-rust-static.txt \
+//! MR_TEST_UA_WAV=.../voice-114619.wav MR_TEST_UA_GOLDEN=.../uk-rust-static.txt \
+//! cargo test --release -p recorder-transcriber -- --ignored --test-threads 1
+//! ```
+//!
+//! The golden texts are what this build produced; any change in the engine,
+//! model, VAD or chunking shows up as a difference.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use recorder_core::manifest::{Manifest, OsInfo, TranscriptStatus};
+use recorder_core::opus_ogg::EncoderConfig;
+use recorder_core::session::{SessionConfig, SessionWriter};
+use recorder_transcribe::Speaker;
+use recorder_transcribe::checkpoint::PARTIAL_FILE;
+use recorder_transcribe::dialog::normalized_words;
+use recorder_transcribe::model::ModelPaths;
+use recorder_transcribe::output::{Document, JSON_FILE, TXT_FILE};
+use recorder_transcribe::protocol::Message;
+use recorder_transcriber::engine::Engine;
+use recorder_transcriber::pipeline::{self, Options};
+
+const THREADS: u32 = 2;
+
+fn env_path(name: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")))
+}
+
+fn model_dir() -> PathBuf {
+    env_path("MR_MODEL_DIR")
+}
+
+fn engine() -> Engine {
+    Engine::load(&ModelPaths::in_dir(&model_dir()), THREADS).unwrap()
+}
+
+fn wav(name: &str) -> Vec<f32> {
+    let w = sherpa_onnx::Wave::read(&env_path(name).to_string_lossy()).unwrap();
+    assert_eq!(w.sample_rate(), 16_000);
+    w.samples().to_vec()
+}
+
+fn golden(name: &str) -> Option<String> {
+    std::env::var_os(name).map(|p| std::fs::read_to_string(p).unwrap().trim().to_string())
+}
+
+/// The benchmark normalization (work/bilingual-score.py), reduced to what
+/// this reference needs: lower case, words of letters/digits/apostrophes,
+/// titles expanded, "to morrow" joined, British spellings made American.
+fn wer_tokens(text: &str) -> Vec<String> {
+    let words: Vec<String> = text
+        .to_lowercase()
+        .replace(['’', '‘'], "'")
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '\''))
+        .map(|w| w.trim_matches('\''))
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            match w {
+                "mr" => "mister",
+                "mrs" => "missus",
+                "ms" => "miss",
+                "dr" => "doctor",
+                "labour" => "labor",
+                "labourer" => "laborer",
+                "labourers" => "laborers",
+                "colour" => "color",
+                "favourite" => "favorite",
+                "centre" => "center",
+                "theatre" => "theater",
+                w => w,
+            }
+            .to_string()
+        })
+        .collect();
+    let mut out = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        if words[i] == "to" && words.get(i + 1).is_some_and(|w| w == "morrow") {
+            out.push("tomorrow".to_string());
+            i += 2;
+        } else {
+            out.push(words[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+fn wer(reference: &[String], hyp: &[String]) -> f64 {
+    let mut prev: Vec<usize> = (0..=hyp.len()).collect();
+    for (i, r) in reference.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, h) in hyp.iter().enumerate() {
+            cur.push(
+                (prev[j] + usize::from(r != h))
+                    .min(prev[j + 1] + 1)
+                    .min(cur[j] + 1),
+            );
+        }
+        prev = cur;
+    }
+    prev[hyp.len()] as f64 / reference.len() as f64
+}
+
+/// Share of `a`'s words found in order in `b`.
+fn overlap(a: &str, b: &str) -> f64 {
+    let (a, b) = (normalized_words(a), normalized_words(b));
+    let mut prev = vec![0usize; b.len() + 1];
+    for x in &a {
+        let mut cur = vec![0usize; b.len() + 1];
+        for (j, y) in b.iter().enumerate() {
+            cur[j + 1] = if x == y {
+                prev[j] + 1
+            } else {
+                prev[j + 1].max(cur[j])
+            };
+        }
+        prev = cur;
+    }
+    prev[b.len()] as f64 / a.len().max(1) as f64
+}
+
+#[test]
+#[ignore = "needs the model"]
+fn english_matches_the_reference_and_the_golden_text() {
+    let e = engine();
+    let ch = pipeline::transcribe_mono(&e, Speaker::Me, &wav("MR_TEST_EN_WAV")).unwrap();
+    let text = ch.text();
+    let reference = std::fs::read_to_string(env_path("MR_TEST_EN_REF")).unwrap();
+    let w = wer(&wer_tokens(&reference), &wer_tokens(&text));
+    println!("EN WER {:.2}% ({} chunks)", w * 100.0, ch.chunks());
+    // 3.58% in the benchmarks (10 errors in 279 words); no lost phrases.
+    assert!(w <= 0.04, "EN WER {:.2}%", w * 100.0);
+    if let Some(g) = golden("MR_TEST_EN_GOLDEN") {
+        assert_eq!(text, g);
+    }
+}
+
+#[test]
+#[ignore = "needs the model"]
+fn ukrainian_matches_the_golden_text() {
+    let e = engine();
+    let ch = pipeline::transcribe_mono(&e, Speaker::Me, &wav("MR_TEST_UA_WAV")).unwrap();
+    let text = ch.text();
+    let latin = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    assert_eq!(latin, 0, "Latin letters in the Ukrainian text: {text}");
+    assert_eq!(ch.chunks(), 12);
+    assert_eq!(
+        text,
+        golden("MR_TEST_UA_GOLDEN").expect("set MR_TEST_UA_GOLDEN")
+    );
+}
+
+fn temp_root(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("mr-tx-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Writes a session as the recorder would, from two mono signals.
+fn make_session(root: &Path, part_seconds: u32, left: &[f32], right: &[f32]) -> PathBuf {
+    let mut s = SessionWriter::create(SessionConfig {
+        root: root.to_path_buf(),
+        part_seconds,
+        encoder: EncoderConfig::default(),
+        os: OsInfo {
+            family: "test".into(),
+            version: "0".into(),
+            arch: "x".into(),
+        },
+    })
+    .unwrap();
+    let dir = s.dir().to_path_buf();
+    let n = left.len().max(right.len()).div_ceil(320) * 320;
+    let mut frame = vec![0.0f32; 640];
+    for start in (0..n).step_by(320) {
+        for i in 0..320 {
+            frame[2 * i] = left.get(start + i).copied().unwrap_or(0.0);
+            frame[2 * i + 1] = right.get(start + i).copied().unwrap_or(0.0);
+        }
+        s.push_frame(&frame).unwrap();
+    }
+    s.finish().unwrap();
+    dir
+}
+
+fn transcribe(
+    dir: &Path,
+    stop: &AtomicBool,
+    on: &mut dyn FnMut(&Message),
+) -> anyhow::Result<Vec<String>> {
+    let opts = Options {
+        model_dir: model_dir(),
+        threads: THREADS,
+    };
+    pipeline::transcribe_session(dir, &opts, &mut |m| on(&m), stop)
+}
+
+fn document(dir: &Path) -> Document {
+    serde_json::from_slice(&std::fs::read(dir.join(JSON_FILE)).unwrap()).unwrap()
+}
+
+fn texts(doc: &Document, speaker: Speaker) -> String {
+    doc.utterances
+        .iter()
+        .filter(|u| u.speaker == speaker && !u.echo)
+        .map(|u| u.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A two-person call: I speak English first, then the other side speaks
+/// Ukrainian. One file, then the same call split into one-minute parts,
+/// then an interrupted run that resumes.
+#[test]
+#[ignore = "needs the model"]
+fn sessions_become_a_dialogue_with_speakers_and_times() {
+    let en = wav("MR_TEST_EN_WAV");
+    let ua_full = wav("MR_TEST_UA_WAV");
+    // The other side starts after me, on a VAD window boundary.
+    let offset = en.len().div_ceil(512) * 512 + 512 * 20;
+    let ua = &ua_full[..16_000 * 100];
+    let mut right = vec![0.0; offset];
+    right.extend_from_slice(ua);
+    let root = temp_root("dialog");
+
+    // One file.
+    let one = make_session(&root, 0, &en, &right);
+    let mut events = Vec::new();
+    let files = transcribe(&one, &AtomicBool::new(false), &mut |m| {
+        events.push(m.clone())
+    })
+    .unwrap();
+    assert_eq!(files.len(), 3);
+    assert!(matches!(events.first(), Some(Message::Started { .. })));
+    assert!(matches!(events.last(), Some(Message::Done { .. })));
+    assert!(events.iter().any(|m| matches!(m, Message::Progress { .. })));
+    let doc = document(&one);
+    let me = texts(&doc, Speaker::Me);
+    let others = texts(&doc, Speaker::Others);
+    let en_golden = golden("MR_TEST_EN_GOLDEN").unwrap_or_default();
+    println!("me/en overlap {:.3}", overlap(&en_golden, &me));
+    assert!(overlap(&en_golden, &me) > 0.97, "{me}");
+    assert!(others.split_whitespace().count() > 150, "{others}");
+    assert_eq!(
+        others.chars().filter(|c| c.is_ascii_alphabetic()).count(),
+        0
+    );
+    let switch = offset as f64 / 16_000.0;
+    for u in &doc.utterances {
+        match u.speaker {
+            Speaker::Me => assert!(u.end <= switch + 0.5, "{u:?}"),
+            Speaker::Others => assert!(u.start >= switch - 0.5, "{u:?}"),
+        }
+        assert!(u.start <= u.end);
+    }
+    assert!(doc.utterances.windows(2).all(|w| w[0].start <= w[1].start));
+    let txt = std::fs::read_to_string(one.join(TXT_FILE)).unwrap();
+    let me_line = txt.find("] Me: ").unwrap();
+    let others_line = txt.find("] Others: ").unwrap();
+    assert!(me_line < others_line);
+    let m = Manifest::load(&one).unwrap();
+    assert_eq!(
+        m.transcript.as_ref().unwrap().status,
+        TranscriptStatus::Done
+    );
+    assert!(!one.join(PARTIAL_FILE).exists());
+
+    // The same call in one-minute parts. Each part starts a new Opus
+    // encoder, so the audio after the first minute differs slightly and the
+    // recognizer may pick a word differently; nothing may go missing.
+    let parts = make_session(&root, 60, &en, &right);
+    assert!(Manifest::load(&parts).unwrap().parts.len() >= 4);
+    transcribe(&parts, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let doc_parts = document(&parts);
+    let (me_p, others_p) = (
+        texts(&doc_parts, Speaker::Me),
+        texts(&doc_parts, Speaker::Others),
+    );
+    println!(
+        "parts vs one file: me {:.3}, others {:.3}",
+        overlap(&me, &me_p),
+        overlap(&others, &others_p)
+    );
+    assert!(overlap(&me, &me_p) > 0.97, "{me_p}");
+    // The Ukrainian sample is a noisy, spontaneous voice note: about a
+    // fifth of its words are uncertain for the model and flip with any
+    // change to the audio (measured: 0.85 between these two sessions, 0.79
+    // between either and the original WAV).
+    assert!(overlap(&others, &others_p) > 0.75, "{others_p}");
+    let last_end = |d: &Document| d.utterances.iter().map(|u| u.end).fold(0.0, f64::max);
+    assert!((last_end(&doc_parts) - last_end(&doc)).abs() < 1.0);
+
+    // Stopped after two chunks, then resumed: same result.
+    let stop = AtomicBool::new(false);
+    let mut seen = 0;
+    let err = transcribe(&one, &stop, &mut |m| {
+        if matches!(m, Message::Progress { .. }) {
+            seen += 1;
+            if seen == 3 {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err:#}");
+    assert!(one.join(PARTIAL_FILE).exists());
+    assert_eq!(
+        Manifest::load(&one).unwrap().transcript.unwrap().status,
+        TranscriptStatus::Done,
+        "a cancelled run restores the previous state"
+    );
+    transcribe(&one, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let resumed = document(&one);
+    assert_eq!(texts(&resumed, Speaker::Me), me);
+    assert_eq!(texts(&resumed, Speaker::Others), others);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Loudspeakers without echo cancellation: the microphone hears the other
+/// side 30 ms later at -10 dB. Those words must not appear as mine.
+#[test]
+#[ignore = "needs the model"]
+fn echo_of_the_other_side_is_hidden() {
+    let en = wav("MR_TEST_EN_WAV");
+    let delay = 480;
+    let mut left = vec![0.0; delay];
+    left.extend(en.iter().map(|s| s * 0.3));
+    let root = temp_root("echo");
+    let dir = make_session(&root, 0, &left, &en);
+    transcribe(&dir, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let doc = document(&dir);
+    let me: Vec<_> = doc
+        .utterances
+        .iter()
+        .filter(|u| u.speaker == Speaker::Me)
+        .collect();
+    let hidden = me.iter().filter(|u| u.echo).count();
+    println!(
+        "{hidden} of {} microphone utterances marked as echo",
+        me.len()
+    );
+    assert!(!me.is_empty());
+    assert_eq!(hidden, me.len(), "{me:#?}");
+    let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
+    assert!(!txt.contains("] Me: "), "{txt}");
+    std::fs::remove_dir_all(root).ok();
+}

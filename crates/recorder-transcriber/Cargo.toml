@@ -1,0 +1,29 @@
+[package]
+name = "recorder-transcriber"
+description = "Meeting Recorder transcriber: Parakeet + silero VAD through sherpa-onnx, run as a separate low-priority process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "meeting-recorder-transcribe"
+path = "src/main.rs"
+
+[dependencies]
+recorder-core.workspace = true
+recorder-transcribe.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6", features = ["derive"] }
+# Static sherpa-onnx + ONNX Runtime from scripts/build-sherpa-onnx.sh
+# (SHERPA_ONNX_LIB_DIR in .cargo/config.toml). Pinned: other versions are
+# not measured.
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["static"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
