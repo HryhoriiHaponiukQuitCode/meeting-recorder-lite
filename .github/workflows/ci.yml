@@ -67,9 +67,9 @@ jobs:
       - name: Transcriber starts
         shell: bash
         run: |
-          for f in target/release/meeting-recorder-transcribe target/release/meeting-recorder-transcribe.exe; do
-            [ -f "$f" ] && "$f" --version
-          done
+          f=target/release/meeting-recorder-transcribe
+          [ -f "$f.exe" ] && f="$f.exe"
+          "$f" --version
       - name: Package
         shell: bash
         env:
