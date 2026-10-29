@@ -2,3 +2,9 @@
 # Visual C++ Redistributable. CI prints the DLL dependencies to confirm.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Static sherpa-onnx + ONNX Runtime for recorder-transcriber, built once by
+# scripts/build-sherpa-onnx.sh (otherwise sherpa-onnx-sys would download the
+# prebuilt libraries, which contain GPL code).
+[env]
+SHERPA_ONNX_LIB_DIR = { value = ".deps/sherpa-onnx-1.13.8/lib", relative = true }
