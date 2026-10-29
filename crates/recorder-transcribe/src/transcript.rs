@@ -57,29 +57,36 @@ fn ends_sentence(word: &str) -> bool {
 /// Splits a chunk's tokens into words and utterances on the timeline.
 pub fn utterances(speaker: Speaker, chunk: &Chunk, result: &ChunkResult) -> Vec<Utterance> {
     // Tokens -> words. Punctuation tokens have no leading space and attach
-    // to the previous word.
+    // to the previous word. Before digits (and some words) the model emits
+    // a token that is only a space: the next token starts a new word.
     let mut words: Vec<Word> = Vec::new();
+    let mut space = false;
     for (i, token) in result.tokens.iter().enumerate() {
         let Some(&t) = result.timestamps.get(i) else {
             break;
         };
+        if token.trim().is_empty() {
+            space = true;
+            continue;
+        }
         let d = result
             .durations
             .get(i)
             .map_or(DEFAULT_TOKEN_S, |&d| d as f64);
         let start = chunk.to_timeline(t as f64);
         let end = start + d.max(0.0);
+        let starts_word = space || token.starts_with(' ');
+        space = false;
         match words.last_mut() {
-            Some(w) if !token.starts_with(' ') => {
+            Some(w) if !starts_word => {
                 w.text.push_str(token);
                 w.end = w.end.max(end);
             }
-            _ => {
-                let text = token.trim_start().to_string();
-                if !text.is_empty() {
-                    words.push(Word { text, start, end });
-                }
-            }
+            _ => words.push(Word {
+                text: token.trim_start().to_string(),
+                start,
+                end,
+            }),
         }
     }
 
@@ -165,6 +172,31 @@ mod tests {
         assert_eq!(u.len(), 2, "{u:?}");
         assert_eq!(u[0].text, "і потім");
         assert_eq!(u[1].text, "ми");
+    }
+
+    /// Real tokens: `[" чи", " на", " ", "1", "4", ","]` is "чи на 14,".
+    #[test]
+    fn a_space_token_separates_numbers_and_words() {
+        let mut c = Chunker::default();
+        c.push(0, &[0.0; 48_000]);
+        let chunk = c.finish().unwrap();
+        let r = result(&[
+            (" чи", 0.0),
+            (" на", 0.2),
+            (" ", 0.4),
+            ("1", 0.45),
+            ("4", 0.5),
+            (",", 0.6),
+            (" нов", 0.8),
+            ("ий", 0.9),
+            (" ", 1.0),
+            ("ю", 1.05),
+            ("зер", 1.1),
+        ]);
+        let u = utterances(Speaker::Me, &chunk, &r);
+        assert_eq!(u[0].text, "чи на 14, новий юзер");
+        assert_eq!(u[0].words.len(), 5);
+        assert!((u[0].words[2].start - 0.45).abs() < 1e-9);
     }
 
     #[test]

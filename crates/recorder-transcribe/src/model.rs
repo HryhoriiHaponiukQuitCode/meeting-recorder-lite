@@ -225,8 +225,9 @@ fn cancelled() -> io::Error {
 }
 
 /// A system tool; on Windows the one in System32, not a copy from Git or
-/// elsewhere on PATH.
-fn system_tool(name: &str) -> PathBuf {
+/// elsewhere on PATH, and without a console window popping up.
+fn system_tool(name: &str) -> Command {
+    let mut path = PathBuf::from(name);
     if cfg!(windows)
         && let Some(root) = std::env::var_os("SystemRoot")
     {
@@ -234,10 +235,18 @@ fn system_tool(name: &str) -> PathBuf {
             .join("System32")
             .join(format!("{name}.exe"));
         if p.exists() {
-            return p;
+            path = p;
         }
     }
-    PathBuf::from(name)
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 /// Downloads `url` into `dest` with curl, resuming a partial file, while
@@ -254,7 +263,7 @@ fn fetch(
         fs::remove_file(dest)?;
     }
     if !fs::metadata(dest).is_ok_and(|m| m.len() == size) {
-        let mut child = Command::new(system_tool("curl"))
+        let mut child = system_tool("curl")
             .args([
                 "--fail",
                 "--location",
@@ -374,7 +383,7 @@ pub fn download(
             fs::remove_dir_all(&unpack)?;
         }
         fs::create_dir_all(&unpack)?;
-        let out = Command::new(system_tool("tar"))
+        let out = system_tool("tar")
             .arg("-xjf")
             .arg(&archive)
             .arg("-C")
