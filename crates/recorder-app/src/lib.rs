@@ -9,6 +9,7 @@ pub mod permissions;
 pub mod procstat;
 mod recorder;
 pub mod settings;
+pub mod transcription;
 
 pub use monitor::{Monitor, MonitorStatus};
 pub use recorder::{AecMode, Notice, Recorder, RecorderOptions, Status, SystemOption};

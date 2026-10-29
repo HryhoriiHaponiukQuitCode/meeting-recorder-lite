@@ -693,6 +693,16 @@ pub fn meter(ui: &mut Ui, level: f32) {
     painter.rect_filled(fill, 3, color);
 }
 
+/// A thin blue progress bar, `fraction` in 0..=1.
+pub fn progress(ui: &mut Ui, fraction: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3, TRACK);
+    let mut fill = rect;
+    fill.set_width((rect.width() * fraction.clamp(0.0, 1.0)).max(6.0));
+    painter.rect_filled(fill, 3, BLUE);
+}
+
 pub fn to_db(peak: f32) -> f32 {
     if peak > 0.0 {
         20.0 * peak.log10()

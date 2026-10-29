@@ -5,6 +5,8 @@
 //! recorder devices          list audio devices
 //! recorder recover          close sessions left open by a crash
 //! recorder verify <dir>     decode a session and report levels; --wav exports me.wav / them.wav
+//! recorder transcribe <dir> transcribe locally into transcript.txt/json/srt
+//! recorder model download   download the speech model (also: status, verify, delete)
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -17,11 +19,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use recorder_app::settings::Settings;
 use recorder_app::{
     AecMode, CONSENT_REMINDER, Recorder, RecorderOptions, SystemOption, logging, recover_all,
+    transcription,
 };
 use recorder_capture::{mic, output};
 use recorder_core::decode::{decode_part, rms_dbfs, write_wav};
 use recorder_core::manifest::{Manifest, PartStatus};
 use recorder_core::{MIC, SYSTEM};
+use recorder_transcribe::model::ModelStatus;
 
 #[derive(Parser)]
 #[command(
@@ -97,6 +101,36 @@ enum Cmd {
         #[arg(long)]
         wav: bool,
     },
+    /// Transcribe a session locally into transcript.txt/json/srt.
+    Transcribe {
+        session: PathBuf,
+        /// Recognizer threads (default: the setting, 2).
+        #[arg(long)]
+        threads: Option<u32>,
+        /// Folder with the speech model (default: the setting).
+        #[arg(long)]
+        model_dir: Option<PathBuf>,
+    },
+    /// Download, check or delete the speech model (640 MiB).
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
+        /// Folder with the speech model (default: the setting).
+        #[arg(long, global = true)]
+        model_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelAction {
+    /// Show where the model is and whether it is complete.
+    Status,
+    /// Download what is missing (resumes an interrupted download).
+    Download,
+    /// Check every file against its SHA256.
+    Verify,
+    /// Delete the model files.
+    Delete,
 }
 
 fn main() -> Result<()> {
@@ -160,7 +194,95 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Verify { session, wav } => verify(&session, wav),
+        Cmd::Transcribe {
+            session,
+            threads,
+            model_dir,
+        } => {
+            let dir = model_dir.unwrap_or_else(|| settings.models_dir());
+            if transcription::model_status(&dir) != ModelStatus::Ready {
+                anyhow::bail!(
+                    "the speech model is not in {}; run `recorder model download`",
+                    dir.display()
+                );
+            }
+            let threads = threads.unwrap_or_else(|| settings.transcription_threads());
+            // The transcriber prints its own progress to stderr.
+            let status = std::process::Command::new(transcription::helper_path()?)
+                .arg("session")
+                .arg(&session)
+                .arg("--model-dir")
+                .arg(&dir)
+                .arg("--threads")
+                .arg(threads.to_string())
+                .status()
+                .context("cannot start the transcriber")?;
+            if !status.success() {
+                anyhow::bail!("transcription failed");
+            }
+            println!(
+                "{}",
+                session
+                    .join(recorder_transcribe::output::TXT_FILE)
+                    .display()
+            );
+            Ok(())
+        }
+        Cmd::Model { action, model_dir } => {
+            let dir = model_dir.unwrap_or_else(|| settings.models_dir());
+            model_command(action, &dir)
+        }
     }
+}
+
+fn model_command(action: ModelAction, dir: &Path) -> Result<()> {
+    use recorder_transcribe::model;
+    match action {
+        ModelAction::Status => {
+            println!(
+                "{}: {:?}, {:.0} MiB on disk",
+                dir.display(),
+                model::status(dir),
+                model::disk_size(dir) as f64 / 1048576.0
+            );
+        }
+        ModelAction::Download => {
+            let stop = Arc::new(AtomicBool::new(false));
+            {
+                let stop = stop.clone();
+                ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
+                    .context("cannot install Ctrl+C handler")?;
+            }
+            println!("Downloading the speech model to {} …", dir.display());
+            let mut last = std::time::Instant::now();
+            model::download(
+                dir,
+                &mut |p| {
+                    if last.elapsed() >= Duration::from_millis(500) {
+                        last = std::time::Instant::now();
+                        eprint!(
+                            "\r{:?}: {:.0} / {:.0} MiB   ",
+                            p.phase,
+                            p.done as f64 / 1048576.0,
+                            p.total as f64 / 1048576.0
+                        );
+                    }
+                },
+                &stop,
+            )?;
+            eprintln!();
+            println!("OK: model downloaded and verified.");
+        }
+        ModelAction::Verify => {
+            model::verify(dir)?;
+            println!("OK: all model files match their SHA256.");
+        }
+        ModelAction::Delete => {
+            model::delete(dir)?;
+            println!("Deleted the model from {}.", dir.display());
+        }
+    }
+    Ok(())
 }
 
 fn record(opts: RecorderOptions) -> Result<()> {

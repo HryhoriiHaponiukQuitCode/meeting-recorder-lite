@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 recorder-app.workspace = true
 recorder-capture.workspace = true
+recorder-core.workspace = true
+recorder-transcribe.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts"] }
@@ -28,9 +30,14 @@ identifier = "io.github.meeting-recorder-lite"
 publisher = "Meeting Recorder contributors"
 copyright = "Meeting Recorder contributors"
 category = "Productivity"
-before-packaging-command = "cargo build --release -p recorder-tray"
+before-packaging-command = "cargo build --release -p recorder-tray -p recorder-transcriber"
 out-dir = "../../dist"
-binaries = [{ path = "meeting-recorder", main = true }]
+# The transcriber sits next to the app binary (Contents/MacOS, the install
+# folder on Windows); the app starts it as a separate process.
+binaries = [
+  { path = "meeting-recorder", main = true },
+  { path = "meeting-recorder-transcribe" },
+]
 icons = [
   "../../packaging/icons/32x32.png",
   "../../packaging/icons/128x128.png",
@@ -38,7 +45,11 @@ icons = [
   "../../packaging/icons/512x512.png",
   "../../packaging/icons/icon.ico",
 ]
-resources = ["../../THIRD_PARTY_NOTICES.md", "../../README.md"]
+resources = [
+  "../../THIRD_PARTY_NOTICES.md",
+  "../../README.md",
+  { src = "../../packaging/licenses", target = "licenses" },
+]
 
 [package.metadata.packager.macos]
 minimum-system-version = "13.0"

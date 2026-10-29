@@ -18,6 +18,12 @@ pub struct Settings {
     pub recordings_dir: Option<PathBuf>,
     /// Microphone name substring; `None` = system default.
     pub mic_device: Option<String>,
+    /// Transcribe each recording once it is saved (when the model is there).
+    pub transcribe_automatically: bool,
+    /// Recognizer threads: 2 = gentle (default), 4 = fast.
+    pub transcription_threads: u32,
+    /// `None` = the default models folder.
+    pub models_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -28,6 +34,9 @@ impl Default for Settings {
             aec: AecMode::Auto,
             recordings_dir: None,
             mic_device: None,
+            transcribe_automatically: true,
+            transcription_threads: recorder_transcribe::DEFAULT_THREADS,
+            models_dir: None,
         }
     }
 }
@@ -59,5 +68,17 @@ impl Settings {
         self.recordings_dir
             .clone()
             .unwrap_or_else(crate::paths::default_recordings_dir)
+    }
+
+    pub fn models_dir(&self) -> PathBuf {
+        self.models_dir
+            .clone()
+            .unwrap_or_else(crate::paths::default_models_dir)
+    }
+
+    /// Threads within 1..=available cores.
+    pub fn transcription_threads(&self) -> u32 {
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
+        self.transcription_threads.clamp(1, cores.max(1))
     }
 }
