@@ -227,7 +227,11 @@ pub fn start(producer: SharedProducer, events: Sender<CaptureEvent>) -> SourceHa
     SourceHandle::new(stop, thread)
 }
 
-fn supervise(producer: SharedProducer, events: Sender<CaptureEvent>, stop: Arc<AtomicBool>) {
+pub(crate) fn supervise(
+    producer: SharedProducer,
+    events: Sender<CaptureEvent>,
+    stop: Arc<AtomicBool>,
+) {
     if permissions::ensure_screen_capture() == Access::Denied {
         let _ = events.send(CaptureEvent::Failed {
             source: Source::System,

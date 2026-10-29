@@ -81,6 +81,11 @@ pub enum Notice {
     },
     /// No system audio for two minutes while the microphone is active.
     SystemSilent,
+    /// The system-audio capture delivers nothing at all (not even silence):
+    /// the other participants are not being recorded.
+    SystemMissing,
+    /// System audio arrives again after [`Notice::SystemMissing`].
+    SystemBack,
     /// The computer slept; recording continued in the same file.
     Resumed {
         slept_s: u64,
@@ -248,9 +253,65 @@ pub(crate) fn start_system(
     }
 }
 
-fn drain(engine: &mut Engine, consumer: &mut BlockConsumer, channel: usize, buf: &mut Vec<f32>) {
+/// Feeds every captured block to the engine; returns how many there were.
+fn drain(
+    engine: &mut Engine,
+    consumer: &mut BlockConsumer,
+    channel: usize,
+    buf: &mut Vec<f32>,
+) -> usize {
+    let mut blocks = 0;
     while let Some(meta) = consumer.pop(buf) {
         engine.ingest(channel, meta.host_ns, meta.rate, buf);
+        blocks += 1;
+    }
+    blocks
+}
+
+/// No system-audio block for this long means the capture is broken (only
+/// for backends that deliver blocks in silence too).
+const NO_SYSTEM_AUDIO_AFTER: Duration = Duration::from_secs(5);
+
+/// Tracks whether system audio arrives at all and says when that changes.
+#[derive(Debug)]
+pub(crate) struct SystemWatch {
+    /// Silence still arrives as blocks with this backend.
+    enabled: bool,
+    last_block: Instant,
+    missing: bool,
+}
+
+impl SystemWatch {
+    pub(crate) fn new(method: &str, now: Instant) -> Self {
+        Self {
+            enabled: method == "coreaudio_process_tap",
+            last_block: now,
+            missing: false,
+        }
+    }
+
+    /// After a pause or sleep the wait starts again.
+    pub(crate) fn restart(&mut self, now: Instant) {
+        self.last_block = now;
+    }
+
+    /// `Some(true)`: system audio just went missing; `Some(false)`: it is
+    /// back; `None`: no change.
+    pub(crate) fn update(&mut self, blocks: usize, now: Instant) -> Option<bool> {
+        if !self.enabled {
+            return None;
+        }
+        if blocks > 0 {
+            self.last_block = now;
+            if self.missing {
+                self.missing = false;
+                return Some(false);
+            }
+        } else if !self.missing && now.duration_since(self.last_block) >= NO_SYSTEM_AUDIO_AFTER {
+            self.missing = true;
+            return Some(true);
+        }
+        None
     }
 }
 
@@ -350,6 +411,7 @@ fn run(
     let mut last_stats = Instant::now();
     let mut last_proc = (Instant::now(), procstat::sample());
     let mut warned_silent = false;
+    let mut system_watch = SystemWatch::new(method, Instant::now());
     let mut last_wall = SystemTime::now();
     let mut last_host = host_now_ns();
     let mut write_error = None;
@@ -400,6 +462,7 @@ fn run(
             discard(&mut sys_c, &mut buf);
             last_wall = SystemTime::now();
             last_host = host_now_ns();
+            system_watch.restart(Instant::now());
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
@@ -424,6 +487,7 @@ fn run(
                 write_error = Some(e);
                 break;
             }
+            system_watch.restart(Instant::now());
             let _ = notices.send(Notice::Resumed {
                 slept_s: gap.as_secs(),
             });
@@ -435,10 +499,27 @@ fn run(
             handle_event(&mut engine, &mut states, &opts, &notices, &status, ev);
         }
         drain(&mut engine, &mut mic_c, MIC, &mut buf);
-        drain(&mut engine, &mut sys_c, SYSTEM, &mut buf);
+        let system_blocks = drain(&mut engine, &mut sys_c, SYSTEM, &mut buf);
         if let Err(e) = engine.tick(host_now_ns()) {
             write_error = Some(e);
             break;
+        }
+        match system_watch.update(system_blocks, Instant::now()) {
+            Some(true) => {
+                tracing::error!("no system audio arrives: the other side is not being recorded");
+                let _ = engine
+                    .session_mut()
+                    .event("system_audio_missing", serde_json::Value::Null);
+                let _ = notices.send(Notice::SystemMissing);
+            }
+            Some(false) => {
+                tracing::info!("system audio arrives again");
+                let _ = engine
+                    .session_mut()
+                    .event("system_audio_back", serde_json::Value::Null);
+                let _ = notices.send(Notice::SystemBack);
+            }
+            None => {}
         }
 
         let peaks = engine.take_peaks();
@@ -676,6 +757,10 @@ impl Notice {
             Notice::SystemSilent => {
                 "System audio has been silent for 2 minutes while the microphone is active. Check the output device.".into()
             }
+            Notice::SystemMissing => {
+                "The other participants are not being recorded: no system audio arrives. The app keeps reconnecting; your microphone is still recorded.".into()
+            }
+            Notice::SystemBack => "System audio is being recorded again.".into(),
             Notice::Resumed { slept_s } => {
                 format!("The computer slept for {slept_s} s; recording continued in the same file.")
             }
@@ -690,7 +775,41 @@ impl Notice {
             Notice::PermissionDenied(_)
                 | Notice::DeviceFailed { .. }
                 | Notice::SystemSilent
+                | Notice::SystemMissing
                 | Notice::WriteFailed(_)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_system_audio_is_reported_once_and_its_return_too() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut w = SystemWatch::new("coreaudio_process_tap", t0);
+        // Blocks every 20 ms: fine.
+        for i in 1..100 {
+            assert_eq!(w.update(2, at(i * 20)), None);
+        }
+        // Nothing for 5 s after the last block at 1980 ms.
+        assert_eq!(w.update(0, at(1980 + 4900)), None);
+        assert_eq!(w.update(0, at(1980 + 5000)), Some(true));
+        assert_eq!(w.update(0, at(20_000)), None, "reported once");
+        assert_eq!(w.update(3, at(20_020)), Some(false));
+        assert_eq!(w.update(3, at(20_040)), None);
+    }
+
+    #[test]
+    fn a_pause_restarts_the_wait_and_other_backends_are_not_watched() {
+        let t0 = Instant::now();
+        let mut w = SystemWatch::new("coreaudio_process_tap", t0);
+        w.restart(t0 + Duration::from_secs(60));
+        assert_eq!(w.update(0, t0 + Duration::from_secs(63)), None);
+        // WASAPI loopback delivers nothing while nothing plays.
+        let mut w = SystemWatch::new("wasapi_loopback", t0);
+        assert_eq!(w.update(0, t0 + Duration::from_secs(600)), None);
     }
 }

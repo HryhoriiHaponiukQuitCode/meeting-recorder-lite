@@ -8,6 +8,13 @@
 //! the tap (drift-compensated) as its input → an IOProc → start. When the
 //! default output device or the tap format changes, the tap is rebuilt.
 //!
+//! A tap can come up dead: everything is created without an error, but the
+//! IOProc is never called (seen intermittently on macOS 26, a whole call
+//! with an empty right channel). A working tap calls it every few
+//! milliseconds even in silence, so [`Liveness`] treats [`DEAD_AFTER`]
+//! without a call as dead and the tap is rebuilt. If that fails twice in a
+//! row and ScreenCaptureKit is already allowed, capture switches to it.
+//!
 //! `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap` are
 //! resolved at run time with `dlsym`, so the binary still launches on macOS
 //! 13, where those symbols do not exist.
@@ -16,10 +23,10 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -87,6 +94,43 @@ struct IoContext {
     producer: SharedProducer,
     rate: u32,
     mono: Vec<f32>,
+    /// IOProc calls so far, for the liveness check.
+    calls: Arc<AtomicU64>,
+}
+
+/// A tap whose IOProc has not been called for this long is dead.
+pub(crate) const DEAD_AFTER: Duration = Duration::from_secs(3);
+/// Dead taps in a row before switching to ScreenCaptureKit.
+const DEAD_BEFORE_FALLBACK: u32 = 2;
+
+/// Watches the IOProc call counter of one tap.
+#[derive(Debug)]
+pub(crate) struct Liveness {
+    last_count: u64,
+    last_change: Instant,
+    /// The IOProc has been called at least once.
+    pub(crate) seen: bool,
+}
+
+impl Liveness {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            last_count: 0,
+            last_change: now,
+            seen: false,
+        }
+    }
+
+    /// `true` when the counter has not moved for [`DEAD_AFTER`].
+    pub(crate) fn dead(&mut self, count: u64, now: Instant) -> bool {
+        if count != self.last_count {
+            self.last_count = count;
+            self.last_change = now;
+            self.seen = true;
+            return false;
+        }
+        now.duration_since(self.last_change) >= DEAD_AFTER
+    }
 }
 
 unsafe extern "C-unwind" fn io_proc(
@@ -101,6 +145,7 @@ unsafe extern "C-unwind" fn io_proc(
     // SAFETY: `client` is the IoContext registered with this IOProc; Core
     // Audio calls the IOProc from one thread at a time.
     let ctx = unsafe { &mut *client.cast::<IoContext>() };
+    ctx.calls.fetch_add(1, Ordering::Relaxed);
     unsafe { super::downmix_buffer_list(input.as_ptr(), &mut ctx.mono) };
     let (it, nw) = unsafe { (input_time.as_ref(), now.as_ref()) };
     let valid = |t: &AudioTimeStamp| {
@@ -126,6 +171,8 @@ struct Tap {
     _ctx: Box<IoContext>,
     output_uid: String,
     format: AudioStreamBasicDescription,
+    calls: Arc<AtomicU64>,
+    liveness: Liveness,
 }
 
 impl Drop for Tap {
@@ -213,6 +260,7 @@ fn build(producer: &SharedProducer, output_uid: &str) -> Result<Tap, (String, bo
         ));
     }
     // From here on `Drop for Tap` releases whatever has been created.
+    let calls = Arc::new(AtomicU64::new(0));
     let mut tap = Tap {
         tap_id,
         aggregate_id: 0,
@@ -221,10 +269,13 @@ fn build(producer: &SharedProducer, output_uid: &str) -> Result<Tap, (String, bo
             producer: producer.clone(),
             rate: 48_000,
             mono: Vec::with_capacity(48_000),
+            calls: calls.clone(),
         }),
         output_uid: output_uid.to_string(),
         // SAFETY: plain-old-data struct, overwritten just below.
         format: unsafe { std::mem::zeroed() },
+        calls,
+        liveness: Liveness::new(Instant::now()),
     };
     tap.format = get_property::<AudioStreamBasicDescription>(tap_id, kAudioTapPropertyFormat, None)
         .map_err(|s| (format!("cannot read tap format: {s}"), false))?;
@@ -299,6 +350,7 @@ fn build(producer: &SharedProducer, output_uid: &str) -> Result<Tap, (String, bo
     if status != 0 {
         return Err((format!("AudioDeviceStart failed: {status}"), false));
     }
+    tap.liveness = Liveness::new(Instant::now());
     Ok(tap)
 }
 
@@ -335,8 +387,48 @@ fn supervise(producer: SharedProducer, events: Sender<CaptureEvent>, stop: Arc<A
 
     let mut current: Option<Tap> = None;
     let mut backoff = Duration::from_millis(200);
+    // Taps in a row that never delivered audio.
+    let mut dead_taps = 0u32;
     while !stop.load(Ordering::SeqCst) {
         let output = default_output_device().and_then(device_uid);
+        if let Some(tap) = &mut current {
+            let count = tap.calls.load(Ordering::Relaxed);
+            if tap.liveness.dead(count, Instant::now()) {
+                let never = !tap.liveness.seen;
+                dead_taps = if never { dead_taps + 1 } else { 1 };
+                // Reported once per run of dead taps, so a long outage does
+                // not flood the manifest; the log keeps every attempt.
+                tracing::warn!(
+                    never_called = never,
+                    dead_taps,
+                    "system audio tap delivers no audio, rebuilding"
+                );
+                if dead_taps == 1 {
+                    let _ = events.send(CaptureEvent::Lost {
+                        source: Source::System,
+                        reason: "the system audio tap delivers no audio".into(),
+                    });
+                }
+                current = None;
+                if dead_taps >= DEAD_BEFORE_FALLBACK
+                    && permissions::screen_capture_status() == Access::Granted
+                {
+                    tracing::warn!("switching system audio capture to ScreenCaptureKit");
+                    super::sck::supervise(producer, events, stop);
+                    return;
+                }
+                // Retry soon at first, then every 30 s at most.
+                let wait = Duration::from_secs(u64::from(dead_taps.saturating_sub(1)) * 5)
+                    .min(Duration::from_secs(30));
+                let until = Instant::now() + wait;
+                while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                continue;
+            } else if tap.liveness.seen {
+                dead_taps = 0;
+            }
+        }
         let needs_rebuild = match (&current, &output) {
             (None, _) => true,
             (Some(tap), Some(uid)) => {
@@ -399,4 +491,32 @@ fn supervise(producer: SharedProducer, events: Sender<CaptureEvent>, stop: Arc<A
         thread::sleep(Duration::from_millis(500));
     }
     drop(current);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tap_without_calls_is_dead_after_three_seconds() {
+        let t0 = Instant::now();
+        let mut l = Liveness::new(t0);
+        assert!(!l.dead(0, t0 + Duration::from_millis(2900)));
+        assert!(l.dead(0, t0 + DEAD_AFTER));
+        assert!(!l.seen, "never called");
+    }
+
+    #[test]
+    fn a_working_tap_that_stops_is_dead_three_seconds_later() {
+        let t0 = Instant::now();
+        let mut l = Liveness::new(t0);
+        // Called every 10 ms for a minute: alive.
+        for i in 1..=6000u64 {
+            assert!(!l.dead(i, t0 + Duration::from_millis(i * 10)));
+        }
+        assert!(l.seen);
+        let stopped = t0 + Duration::from_secs(60);
+        assert!(!l.dead(6000, stopped + Duration::from_secs(2)));
+        assert!(l.dead(6000, stopped + DEAD_AFTER));
+    }
 }

@@ -470,11 +470,19 @@ impl App {
                 // Only failures that lose audio reach the window; hints and
                 // status changes (echo risk, silence, device switch, sleep,
                 // recovery) stay in the log.
-                Notice::DeviceFailed { .. } | Notice::WriteFailed(_) => {
+                Notice::DeviceFailed { .. } | Notice::WriteFailed(_) | Notice::SystemMissing => {
                     self.message = Some(Message {
                         text: n.message(),
                         problem: true,
                     });
+                }
+                Notice::SystemBack
+                    if self
+                        .message
+                        .as_ref()
+                        .is_some_and(|m| m.text == Notice::SystemMissing.message()) =>
+                {
+                    self.message = None;
                 }
                 _ => {}
             }
