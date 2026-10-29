@@ -3,28 +3,46 @@
 //! When the call plays through loudspeakers (and echo cancellation is off or
 //! not enough), the microphone also hears the other side, so their words
 //! appear twice: once on the right channel and, quieter, on the left. Such a
-//! "Me" utterance is marked as echo when it overlaps "Others" speech in time
-//! and most of its words are found, in order, in what "Others" said then.
+//! "Me" utterance is marked as echo when it runs **at the same time** as
+//! "Others" speech (an echo is heard while they talk, a few tens of
+//! milliseconds late) and most of its words are found, in order, in what
+//! "Others" said then.
 //!
-//! The threshold: re-recognizing the same speech at a lower level changes a
+//! The thresholds: re-recognizing the same speech at a lower level changes a
 //! few words (typically 10-30% here), while two people really talking at
 //! once share only scattered function words. Requiring 60% of the words, in
-//! order (longest common subsequence), separates the two; one- and two-word
-//! utterances must match completely, because "так" or "ok" overlap by chance.
+//! order (longest common subsequence), separates the two. Utterances of up
+//! to three words must match completely, and at least half of the utterance
+//! must overlap their speech: a short reply right after a question repeats
+//! its words ("…називалася, так?" — "Вроді якось так.") but follows it
+//! rather than overlapping it.
+//!
+//! With headphones and echo cancellation off there is no echo to find, and
+//! the check is skipped altogether (`echo_possible = false`).
 
 use crate::Speaker;
 use crate::transcript::Utterance;
 
-/// Echo arrives slightly later than the original and recognizer timing is
-/// approximate, so the time window is widened by this much on each side.
-const ECHO_WINDOW_S: f64 = 1.0;
+/// How late an echo may run behind the original (delay plus recognizer
+/// timing).
+const ECHO_DELAY_S: f64 = 0.5;
+/// Share of the utterance that must overlap "Others" speech.
+const ECHO_MIN_OVERLAP: f64 = 0.5;
 const ECHO_MIN_RATIO: f64 = 0.6;
+/// Utterances this short must match word for word.
+const ECHO_SHORT_WORDS: usize = 3;
 /// A same-speaker run continues if the next utterance starts within this.
 const TURN_GAP_S: f64 = 4.0;
 
-/// Both channels in chronological order, echo marked.
-pub fn merge(mut me: Vec<Utterance>, others: Vec<Utterance>) -> Vec<Utterance> {
-    mark_echo(&mut me, &others);
+/// Both channels in chronological order, echo marked when it can occur.
+pub fn merge(
+    mut me: Vec<Utterance>,
+    others: Vec<Utterance>,
+    echo_possible: bool,
+) -> Vec<Utterance> {
+    if echo_possible {
+        mark_echo(&mut me, &others);
+    }
     let mut all = me;
     all.extend(others);
     all.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.end.total_cmp(&b.end)));
@@ -37,17 +55,25 @@ pub fn mark_echo(me: &mut [Utterance], others: &[Utterance]) {
         if mine.is_empty() {
             continue;
         }
-        let (from, to) = (u.start - ECHO_WINDOW_S, u.end + ECHO_WINDOW_S);
-        let theirs: Vec<String> = others
+        // "Others" speech that this utterance could be the echo of.
+        let near: Vec<&Utterance> = others
             .iter()
-            .filter(|o| o.end >= from && o.start <= to)
-            .flat_map(|o| normalized_words(&o.text))
+            .filter(|o| o.start <= u.end && o.end + ECHO_DELAY_S >= u.start)
             .collect();
-        if theirs.is_empty() {
+        let overlap: f64 = near
+            .iter()
+            .map(|o| (u.end.min(o.end + ECHO_DELAY_S) - u.start.max(o.start)).max(0.0))
+            .sum();
+        let duration = (u.end - u.start).max(0.1);
+        if overlap / duration < ECHO_MIN_OVERLAP {
             continue;
         }
+        let theirs: Vec<String> = near
+            .iter()
+            .flat_map(|o| normalized_words(&o.text))
+            .collect();
         let ratio = lcs(&mine, &theirs) as f64 / mine.len() as f64;
-        u.echo = if mine.len() <= 2 {
+        u.echo = if mine.len() <= ECHO_SHORT_WORDS {
             ratio >= 1.0
         } else {
             ratio >= ECHO_MIN_RATIO
@@ -146,7 +172,9 @@ mod tests {
             // Later, alone.
             utt(Speaker::Me, 20.0, 22.0, "Добре, тоді до четверга."),
         ];
-        let d = merge(me, others);
+        let d = merge(me.clone(), others.clone(), true);
+        // Headphones without echo cancellation: nothing is marked.
+        assert!(merge(me, others, false).iter().all(|u| !u.echo));
         let flags: Vec<(&str, bool)> = d
             .iter()
             .filter(|u| u.speaker == Speaker::Me)
@@ -169,6 +197,21 @@ mod tests {
         mark_echo(&mut me, &others);
         assert!(me[0].echo);
         assert!(!me[1].echo);
+    }
+
+    /// From a real call: a reply that repeats words of the question right
+    /// after it is not an echo.
+    #[test]
+    fn a_reply_after_the_question_is_not_echo() {
+        let others = vec![utt(
+            Speaker::Others,
+            57.1,
+            60.5,
+            "той Тахо, якось там організація називалася, так?",
+        )];
+        let mut me = vec![utt(Speaker::Me, 61.0, 62.0, "Вроді якось так.")];
+        mark_echo(&mut me, &others);
+        assert!(!me[0].echo);
     }
 
     #[test]

@@ -16,6 +16,9 @@ pub struct SessionInfo {
     pub seconds: u64,
     /// Still being recorded (by this or another app instance).
     pub recording: bool,
+    /// The manifest lists audio, but none of the files is there (deleted
+    /// or moved by hand).
+    pub audio_missing: bool,
     pub transcript: TranscriptState,
 }
 
@@ -25,6 +28,8 @@ impl SessionInfo {
             started: m.started_at_utc,
             seconds: m.parts.iter().map(|p| p.duration_ms).sum::<u64>() / 1000,
             recording: m.status == Status::Recording,
+            audio_missing: !m.parts.is_empty()
+                && !m.parts.iter().any(|p| dir.join(&p.file).is_file()),
             transcript: transcript_state_of(m, &dir),
             dir,
         }
@@ -32,7 +37,7 @@ impl SessionInfo {
 
     /// Has audio and is closed, so it can be transcribed.
     pub fn transcribable(&self) -> bool {
-        !self.recording && self.seconds > 0
+        !self.recording && self.seconds > 0 && !self.audio_missing
     }
 }
 
@@ -103,6 +108,10 @@ mod tests {
         session(&root, "now", 1, Status::Recording, 4_000);
         std::fs::create_dir_all(root.join("not-a-session")).unwrap();
 
+        // Audio files that exist, except for "old".
+        for name in ["crashed", "now"] {
+            std::fs::write(root.join(name).join("part_0001.ogg"), b"x").unwrap();
+        }
         let all = list(&root);
         let names: Vec<_> = all
             .iter()
@@ -113,6 +122,11 @@ mod tests {
         assert!(!all[1].transcribable());
         assert_eq!(all[3].seconds, 90);
         assert_eq!(all[3].transcript, TranscriptState::None);
+        assert!(
+            all[3].audio_missing && !all[3].transcribable(),
+            "its file was deleted"
+        );
+        assert!(!all[2].audio_missing && all[2].transcribable());
         assert_eq!(latest(&root).unwrap().dir, root.join("crashed"));
         assert!(list(&root.join("missing")).is_empty());
         std::fs::remove_dir_all(root).ok();

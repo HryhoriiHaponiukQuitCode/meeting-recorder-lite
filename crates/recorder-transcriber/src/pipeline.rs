@@ -182,6 +182,15 @@ fn signature() -> String {
     )
 }
 
+/// The microphone can hear the other side unless the whole call went to
+/// headphones with echo cancellation off. Old manifests without the device
+/// fields count as possible.
+fn echo_possible(m: &Manifest) -> bool {
+    m.devices.echo_risk != "unlikely"
+        || m.devices.aec == "on"
+        || m.events.iter().any(|e| e.kind == "aec")
+}
+
 fn set_state(dir: &Path, state: Option<TranscriptInfo>) -> Result<()> {
     let mut m = Manifest::load(dir)?;
     m.transcript = state;
@@ -214,6 +223,9 @@ pub fn transcribe_session(
     }
     if manifest.parts.is_empty() {
         bail!("the recording has no audio");
+    }
+    if !manifest.parts.iter().any(|p| dir.join(&p.file).is_file()) {
+        bail!("the audio files of this recording are missing (deleted or moved?)");
     }
     if model::status(&opts.model_dir) != ModelStatus::Ready {
         bail!("the speech model is not downloaded");
@@ -291,7 +303,8 @@ fn run(
             others.feed(&zeros, &mut ckpt)?;
             fed += n as u64;
         }
-        if part.status == PartStatus::Unreadable {
+        // A missing or unreadable part stays silence; the rest is transcribed.
+        if part.status == PartStatus::Unreadable || !dir.join(&part.file).is_file() {
             continue;
         }
         let mut reader = PartReader::open(&dir.join(&part.file))
@@ -321,7 +334,11 @@ fn run(
     others.finish(&mut ckpt)?;
     progress(fed, true, report);
 
-    let utterances = dialog::merge(me.utterances(), others.utterances());
+    let utterances = dialog::merge(
+        me.utterances(),
+        others.utterances(),
+        echo_possible(manifest),
+    );
     let doc = Document {
         format_version: FORMAT_VERSION,
         session_id: manifest.session_id.to_string(),

@@ -69,6 +69,11 @@ pub fn utterances(speaker: Speaker, chunk: &Chunk, result: &ChunkResult) -> Vec<
             space = true;
             continue;
         }
+        // The model's "unknown" token is not a word.
+        if token.trim() == "<unk>" {
+            space = true;
+            continue;
+        }
         let d = result
             .durations
             .get(i)
@@ -197,6 +202,17 @@ mod tests {
         assert_eq!(u[0].text, "чи на 14, новий юзер");
         assert_eq!(u[0].words.len(), 5);
         assert!((u[0].words[2].start - 0.45).abs() < 1e-9);
+    }
+
+    /// Real tokens: `["2", "5", " <unk>", " сторони"]`.
+    #[test]
+    fn the_unknown_token_is_dropped() {
+        let mut c = Chunker::default();
+        c.push(0, &[0.0; 32_000]);
+        let chunk = c.finish().unwrap();
+        let r = result(&[(" 2", 0.0), ("5", 0.1), (" <unk>", 0.3), (" сторони", 0.5)]);
+        let u = utterances(Speaker::Me, &chunk, &r);
+        assert_eq!(u[0].text, "25 сторони");
     }
 
     #[test]

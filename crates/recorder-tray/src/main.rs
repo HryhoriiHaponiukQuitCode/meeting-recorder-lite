@@ -1124,6 +1124,7 @@ impl App {
         let state = match (&s.transcript, busy, queued) {
             _ if s.recording => "recording now",
             _ if s.seconds == 0 => "no audio",
+            _ if s.audio_missing => "audio file missing",
             (_, true, _) => "transcribing",
             (_, _, true) => "waiting",
             (TranscriptState::Done(_), ..) => "transcript ready",
