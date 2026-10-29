@@ -28,14 +28,26 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-packager@0.11.8
+      # Static sherpa-onnx + ONNX Runtime for the transcriber (no TTS, no
+      # GPL code). Built once per script change, then restored from cache.
+      - name: Cache sherpa-onnx
+        uses: actions/cache@v4
+        with:
+          path: .deps/sherpa-onnx-1.13.8
+          key: sherpa-onnx-1.13.8-${{ matrix.name }}-${{ hashFiles('scripts/build-sherpa-onnx.sh') }}
+      - name: Build sherpa-onnx
+        shell: bash
+        run: scripts/build-sherpa-onnx.sh
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --release -- -D warnings
+      # Tests that need the 640 MB speech model are #[ignore]d; run them
+      # locally (see crates/recorder-transcriber/tests/model.rs).
       - name: Tests
         run: cargo test --workspace --release
       - name: Build
-        run: cargo build --release -p recorder-cli -p recorder-tray
+        run: cargo build --release -p recorder-cli -p recorder-tray -p recorder-transcriber
       - name: DLL dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -44,6 +56,13 @@ jobs:
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object FullName -like '*Hostx64\x64*' | Select-Object -First 1
           & $dumpbin.FullName /dependents target\release\recorder.exe
           & $dumpbin.FullName /dependents target\release\meeting-recorder.exe
+          & $dumpbin.FullName /dependents target\release\meeting-recorder-transcribe.exe
+      - name: Transcriber starts
+        shell: bash
+        run: |
+          for f in target/release/meeting-recorder-transcribe target/release/meeting-recorder-transcribe.exe; do
+            [ -f "$f" ] && "$f" --version
+          done
       - name: Package
         shell: bash
         env:
@@ -64,7 +83,9 @@ jobs:
             sed -i.bak "s|^signing-identity = \"-\"|signing-identity = \"$APPLE_SIGNING_IDENTITY\"|" crates/recorder-tray/Cargo.toml
           fi
           cd crates/recorder-tray && cargo packager --release
-      - name: Installer size (limit 15 MB)
+      # The transcriber with ONNX Runtime adds about 8 MB compressed; the
+      # speech model (640 MB) is downloaded by the app, not shipped.
+      - name: Installer size (limit 25 MB)
         shell: bash
         run: |
           ls -la dist
@@ -72,7 +93,7 @@ jobs:
             [ -f "$f" ] || continue
             size=$(wc -c < "$f")
             echo "$f: $size bytes"
-            [ "$size" -le 15728640 ] || { echo "::error::$f is larger than 15 MB"; exit 1; }
+            [ "$size" -le 26214400 ] || { echo "::error::$f is larger than 25 MB"; exit 1; }
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -82,6 +103,8 @@ jobs:
             dist/*-setup.exe
             target/release/recorder
             target/release/recorder.exe
+            target/release/meeting-recorder-transcribe
+            target/release/meeting-recorder-transcribe.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

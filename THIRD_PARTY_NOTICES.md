@@ -108,6 +108,57 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Bundled libraries
 
+### Transcriber (`meeting-recorder-transcribe`)
+
+Linked statically into the transcriber program only, never into the
+recording app:
+
+- **sherpa-onnx 1.13.8** (https://github.com/k2-fsa/sherpa-onnx), Apache-2.0,
+  © Xiaomi Corporation and the k2-fsa contributors, built without its
+  text-to-speech part. Also the `sherpa-onnx` and `sherpa-onnx-sys` Rust
+  crates (Apache-2.0). It includes kaldi-native-fbank, kaldi-decoder and
+  an OpenFst fork (Apache-2.0), SentencePiece (Apache-2.0) and KISS FFT
+  (BSD-3-Clause). Full Apache-2.0 text: `licenses/Apache-2.0.txt`.
+- **ONNX Runtime 1.28.2** (https://github.com/microsoft/onnxruntime), MIT,
+  © Microsoft Corporation. Its own third-party notices (protobuf, Abseil,
+  Eigen, flatbuffers, …) are in `licenses/onnxruntime-ThirdPartyNotices.txt`.
+
+```
+MIT License
+
+Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### Speech models (downloaded on first use, not in the installer)
+
+- **NVIDIA Parakeet TDT 0.6B v3**
+  (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), © NVIDIA
+  Corporation, licensed under CC-BY-4.0
+  (https://creativecommons.org/licenses/by/4.0/). Used as the INT8 ONNX
+  export `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` by the sherpa-onnx
+  project (quantized and converted; no other changes).
+- **Silero VAD** (https://github.com/snakers4/silero-vad), MIT,
+  © 2020-present Silero Team, as `silero_vad.onnx` from the sherpa-onnx
+  releases.
+
 ### libopus (statically linked through the `opusic-sys` crate)
 
 ```
