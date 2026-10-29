@@ -7,7 +7,7 @@
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 
-use recorder_core::decode::{decode_part, rms_dbfs};
+use recorder_core::decode::{PartReader, decode_part, rms_dbfs};
 use recorder_core::engine::Engine;
 use recorder_core::manifest::{Manifest, OsInfo, PartStatus, Status};
 use recorder_core::opus_ogg::EncoderConfig;
@@ -276,6 +276,48 @@ fn listen_file_mixes_both_sides_into_one_channel() {
         tone_amplitude(&r[16_000..], 300.0) < 0.01,
         "parts must stay split"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The streaming reader hands out about one packet at a time and yields
+/// exactly the samples of the whole-file decode, pre-skip and end trimming
+/// included, for the stereo part and the mono listening mix.
+#[test]
+fn part_reader_streams_the_same_samples_in_small_blocks() {
+    let root = temp_root("stream");
+    let mut engine = new_engine(&root, 0);
+    let dir = engine.session().dir().to_path_buf();
+    let mut sources = [SimSource {
+        channel: MIC,
+        rate: 48_000,
+        drift: 0.0,
+        block: 480,
+        n: 0,
+        gaps: vec![],
+        signal: sine300,
+    }];
+    simulate(&mut engine, &mut sources, 3.0);
+    let m = engine.finish(3_000_000_000).unwrap();
+    for file in ["part_0001.ogg", LISTEN_FILE] {
+        let path = dir.join(file);
+        let whole = decode_part(&path).unwrap();
+        let mut reader = PartReader::open(&path).unwrap();
+        let channels = reader.channels();
+        let (mut all, mut block, mut largest) = (Vec::new(), Vec::new(), 0);
+        while reader.read_block(&mut block).unwrap() {
+            largest = largest.max(block.len());
+            all.append(&mut block);
+        }
+        assert!(reader.complete());
+        // The last block also carries the held-back packet.
+        assert!(
+            largest <= 2 * 320 * channels,
+            "{file}: block of {largest} samples"
+        );
+        assert_eq!(all.len() / channels, m.parts[0].duration_ms as usize * 16);
+        let left: Vec<f32> = all.iter().step_by(channels).copied().collect();
+        assert_eq!(left, whole.left, "{file}");
+    }
     std::fs::remove_dir_all(root).ok();
 }
 

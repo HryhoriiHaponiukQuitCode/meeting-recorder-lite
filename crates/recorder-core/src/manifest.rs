@@ -31,6 +31,31 @@ pub enum PartStatus {
     Unreadable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptStatus {
+    /// The transcriber is working (or crashed; a new run resumes).
+    Running,
+    Done,
+    Failed,
+}
+
+/// Written by the transcriber after the recording is closed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptInfo {
+    pub status: TranscriptStatus,
+    pub updated_at_utc: DateTime<Utc>,
+    /// e.g. `sherpa-onnx 1.13.8`.
+    pub engine: String,
+    /// e.g. `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`.
+    pub model: String,
+    /// Output files in the session folder (`transcript.txt`, ...).
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OsInfo {
     pub family: String,
@@ -114,6 +139,8 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_file: Option<String>,
     pub events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<TranscriptInfo>,
 }
 
 impl Manifest {
@@ -156,6 +183,7 @@ impl Manifest {
             parts: Vec::new(),
             listen_file: None,
             events: Vec::new(),
+            transcript: None,
         }
     }
 
