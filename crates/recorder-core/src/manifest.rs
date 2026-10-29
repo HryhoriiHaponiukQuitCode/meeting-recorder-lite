@@ -73,7 +73,8 @@ pub struct PartInfo {
     pub file: String,
     /// Position on the recording timeline (sleep periods are not counted).
     pub start_offset_ms: u64,
-    /// Wall-clock start, so parts recorded after a sleep can be placed.
+    /// Wall-clock start of the part. Gaps inside a part (sleep, pause) are
+    /// the `sleep` and `pause` events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_utc: Option<DateTime<Utc>>,
     pub duration_ms: u64,
@@ -104,8 +105,14 @@ pub struct Manifest {
     /// `wasapi_loopback`, `wasapi_process_loopback`, `coreaudio_process_tap`,
     /// `screencapturekit` or `none`.
     pub system_capture: String,
+    /// Part limit in seconds; 0 = no limit (the session is one file).
     pub part_length_s: u32,
     pub parts: Vec<PartInfo>,
+    /// Mono mix of both channels for listening (`listen.ogg`), one file for
+    /// the whole session. Transcription uses the parts, where L and R stay
+    /// separate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_file: Option<String>,
     pub events: Vec<Event>,
 }
 
@@ -147,6 +154,7 @@ impl Manifest {
             system_capture: "none".into(),
             part_length_s,
             parts: Vec::new(),
+            listen_file: None,
             events: Vec::new(),
         }
     }

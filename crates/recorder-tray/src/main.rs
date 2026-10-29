@@ -300,7 +300,8 @@ impl App {
         self.check_result = None;
         let opts = RecorderOptions {
             root: self.settings.recordings_dir(),
-            part_seconds: self.settings.part_minutes.max(1) * 60,
+            // One file per call.
+            part_seconds: 0,
             bitrate_kbps: self.settings.bitrate_kbps,
             mic_device: self.settings.mic_device.clone(),
             system: SystemOption::Auto,
@@ -528,9 +529,6 @@ impl App {
                         ui::pill(ui, "Paused", ui::Tone::Amber, false);
                     } else {
                         ui::pill(ui, "Recording", ui::Tone::Red, true);
-                    }
-                    if s.part > 1 {
-                        ui::pill(ui, &format!("Part {}", s.part), ui::Tone::Grey, false);
                     }
                 }
             });

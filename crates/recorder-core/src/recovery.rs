@@ -1,6 +1,7 @@
 //! Crash recovery: on start-up, sessions still marked `recording` whose lock
-//! is not held by a live process are closed: the last part is truncated to
-//! its last complete page, part durations are recomputed from the files, and
+//! is not held by a live process are closed: the last part and `listen.ogg`
+//! are truncated to their last complete page, part durations are recomputed
+//! from the files, and
 //! the session is marked `crashed_recovered`. Running it twice is harmless.
 
 use std::fs::{self, OpenOptions};
@@ -11,7 +12,7 @@ use chrono::{DateTime, Utc};
 
 use crate::manifest::{Manifest, PartInfo, PartStatus, Status};
 use crate::ogg_scan;
-use crate::session::LOCK_FILE;
+use crate::session::{LISTEN_FILE, LOCK_FILE};
 
 #[derive(Clone, Debug)]
 pub struct Recovered {
@@ -87,14 +88,8 @@ pub fn recover_session(dir: &Path) -> io::Result<Option<Recovered>> {
                 PartStatus::Closed,
             )
         } else {
-            let scan = ogg_scan::scan_file(&path)?;
-            if scan.valid_len < scan.file_len {
-                OpenOptions::new()
-                    .write(true)
-                    .open(&path)?
-                    .set_len(scan.valid_len)?;
-                truncated_bytes += scan.file_len - scan.valid_len;
-            }
+            let scan = truncate_to_last_page(&path)?;
+            truncated_bytes += scan.file_len - scan.valid_len;
             let d = scan.duration_ms();
             (
                 d,
@@ -118,6 +113,15 @@ pub fn recover_session(dir: &Path) -> io::Result<Option<Recovered>> {
         offset = start + duration_ms;
     }
 
+    // The listening mix is written and flushed like a part, so the same cut
+    // makes it playable up to its last complete page.
+    let listen = dir.join(LISTEN_FILE);
+    if listen.exists() {
+        let scan = truncate_to_last_page(&listen)?;
+        truncated_bytes += scan.file_len - scan.valid_len;
+        manifest.listen_file = Some(LISTEN_FILE.into());
+    }
+
     let total = parts.iter().map(|p| p.duration_ms).sum();
     let count = parts.len();
     manifest.parts = parts;
@@ -138,4 +142,16 @@ pub fn recover_session(dir: &Path) -> io::Result<Option<Recovered>> {
         duration_ms: total,
         truncated_bytes,
     }))
+}
+
+/// Cuts a half-written page off the end of an Ogg file.
+fn truncate_to_last_page(path: &Path) -> io::Result<ogg_scan::ScanResult> {
+    let scan = ogg_scan::scan_file(path)?;
+    if scan.valid_len < scan.file_len {
+        OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .set_len(scan.valid_len)?;
+    }
+    Ok(scan)
 }

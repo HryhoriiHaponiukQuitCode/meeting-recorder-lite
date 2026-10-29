@@ -12,7 +12,9 @@ use crate::SAMPLE_RATE;
 
 #[derive(Debug, Default)]
 pub struct DecodedPart {
+    /// The microphone, or the only channel of a mono file.
     pub left: Vec<f32>,
+    /// System audio; empty for a mono file (`listen.ogg`).
     pub right: Vec<f32>,
     pub preskip: u16,
     /// The stream ended with an end-of-stream page (cleanly closed part).
@@ -21,8 +23,9 @@ pub struct DecodedPart {
     pub truncated: bool,
 }
 
-/// Decodes a two-channel Ogg Opus file at 16 kHz, applying pre-skip and
-/// end trimming exactly as a conforming player would.
+/// Decodes one of our Ogg Opus files at 16 kHz (a two-channel part or the
+/// mono `listen.ogg`), applying pre-skip and end trimming exactly as a
+/// conforming player would.
 pub fn decode_part(path: &Path) -> io::Result<DecodedPart> {
     let mut reader = PacketReader::new(BufReader::new(File::open(path)?));
     let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
@@ -32,11 +35,20 @@ pub fn decode_part(path: &Path) -> io::Result<DecodedPart> {
         .map_err(io::Error::other)?
         .ok_or_else(|| bad("empty file"))?;
     let h = &head.data;
-    if h.len() < 21 || &h[..8] != b"OpusHead" || h[9] != 2 || h[18] != 1 {
-        return Err(bad("not a two-channel Opus mapping-family-1 stream"));
+    if h.len() < 19 || &h[..8] != b"OpusHead" {
+        return Err(bad("not an Opus stream"));
     }
+    let channels = h[9] as usize;
+    let (streams, coupled, mapping) = match (channels, h[18]) {
+        (1, 0) => (1, 0, vec![0]),
+        (2, 1) if h.len() >= 23 => (h[19], h[20], vec![h[21], h[22]]),
+        _ => {
+            return Err(bad(
+                "neither a mono nor a two-channel mapping-family-1 stream",
+            ));
+        }
+    };
     let preskip = u16::from_le_bytes([h[10], h[11]]);
-    let (streams, coupled, mapping) = (h[19], h[20], [h[21], h[22]]);
     let mut dec = MSDecoder::new(SAMPLE_RATE, streams, coupled, &mapping)
         .map_err(|e| io::Error::other(e.to_string()))?;
     reader
@@ -62,9 +74,13 @@ pub fn decode_part(path: &Path) -> io::Result<DecodedPart> {
         let n = dec
             .decode_float(&packet.data, &mut pcm, false)
             .map_err(|e| io::Error::other(e.to_string()))?;
-        for f in pcm[..n * 2].as_chunks::<2>().0 {
-            out.left.push(f[0]);
-            out.right.push(f[1]);
+        if channels == 1 {
+            out.left.extend_from_slice(&pcm[..n]);
+        } else {
+            for f in pcm[..n * 2].as_chunks::<2>().0 {
+                out.left.push(f[0]);
+                out.right.push(f[1]);
+            }
         }
         if packet.last_in_stream() {
             out.complete = true;
@@ -74,7 +90,7 @@ pub fn decode_part(path: &Path) -> io::Result<DecodedPart> {
     }
     let skip = (preskip as usize / 3).min(out.left.len());
     out.left.drain(..skip);
-    out.right.drain(..skip);
+    out.right.drain(..skip.min(out.right.len()));
     if let Some(g) = end_granule {
         let keep = (g.saturating_sub(preskip as u64) / 3) as usize;
         out.left.truncate(keep);

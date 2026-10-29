@@ -12,7 +12,6 @@ use crate::recorder::AecMode;
 pub struct Settings {
     /// The consent reminder was dismissed with "don't show again".
     pub consent_reminder_dismissed: bool,
-    pub part_minutes: u32,
     pub bitrate_kbps: u32,
     pub aec: AecMode,
     /// `None` = Documents/Meeting Recorder/recordings.
@@ -25,7 +24,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             consent_reminder_dismissed: false,
-            part_minutes: 10,
             bitrate_kbps: 32,
             aec: AecMode::Auto,
             recordings_dir: None,

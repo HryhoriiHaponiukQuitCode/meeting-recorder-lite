@@ -61,7 +61,7 @@ enum AecArg {
 enum Cmd {
     /// Start recording; Ctrl+C stops.
     Start {
-        /// Length of one part, minutes.
+        /// Split the recording into parts of N minutes (default: one file).
         #[arg(long)]
         part_minutes: Option<u32>,
         /// Part length in seconds (for tests; overrides --part-minutes).
@@ -126,7 +126,8 @@ fn main() -> Result<()> {
             let opts = RecorderOptions {
                 root,
                 part_seconds: part_seconds
-                    .unwrap_or(part_minutes.unwrap_or(settings.part_minutes).max(1) * 60),
+                    .or(part_minutes.map(|m| m.max(1) * 60))
+                    .unwrap_or(0),
                 bitrate_kbps: bitrate_kbps.unwrap_or(settings.bitrate_kbps),
                 mic_device: mic.or(settings.mic_device),
                 system,
@@ -325,6 +326,33 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
             }
         }
     }
+    if let Some(file) = &manifest.listen_file {
+        let path = dir.join(file);
+        let total_ms: u64 = manifest.parts.iter().map(|p| p.duration_ms).sum();
+        match decode_part(&path) {
+            Ok(d) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                // A cleanly closed mix covers exactly the parts; after a crash
+                // its last page may end up to a second earlier or later.
+                let tolerance = if d.complete { 16 } else { 16_000 };
+                let match_parts = (d.left.len() as i64 - total_ms as i64 * 16).abs() < tolerance;
+                ok &= match_parts && d.right.is_empty();
+                println!(
+                    "  {}  {:>8.2} s  {:>6.2} MB  mono mix {:>6.1} dBFS  {}{}",
+                    file,
+                    d.left.len() as f64 / 16_000.0,
+                    size as f64 / 1e6,
+                    rms_dbfs(&d.left),
+                    if d.complete { "closed" } else { "no EOS" },
+                    if match_parts { "" } else { "  ≠ parts!" },
+                );
+            }
+            Err(e) => {
+                ok = false;
+                println!("  {file}  ERROR: {e}");
+            }
+        }
+    }
     if wav {
         write_wav(&dir.join("me.wav"), &all_l)?;
         write_wav(&dir.join("them.wav"), &all_r)?;
@@ -333,7 +361,7 @@ fn verify(dir: &Path, wav: bool) -> Result<()> {
     println!(
         "{}",
         if ok {
-            "OK: all parts decode and durations match the manifest."
+            "OK: all files decode and durations match the manifest."
         } else {
             "Problems found, see above."
         }

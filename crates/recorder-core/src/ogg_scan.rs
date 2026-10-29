@@ -118,8 +118,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mr-scan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("p.ogg");
-        let mut w =
-            crate::opus_ogg::PartWriter::create(&path, 7, &Default::default(), &[]).unwrap();
+        let mut w = crate::opus_ogg::PartWriter::create(
+            &path,
+            7,
+            &Default::default(),
+            crate::opus_ogg::Layout::Split,
+            &[],
+        )
+        .unwrap();
         for _ in 0..120 {
             w.write_frame(&[0.1; 640]).unwrap();
         }

@@ -1,8 +1,12 @@
-//! One `part_NNNN.ogg` file: Ogg Opus, 16 kHz, two channels coded as two
-//! independent mono streams (RFC 7845 channel mapping family 1, two streams,
-//! no coupled streams). Decoders see an ordinary two-channel file, but the
-//! encoder never mixes the channels, so the microphone never leaks into the
-//! system channel or the other way round.
+//! One Ogg Opus file at 16 kHz in one of two layouts:
+//!
+//! - [`Layout::Split`] (`part_NNNN.ogg`): two channels coded as two
+//!   independent mono streams (RFC 7845 channel mapping family 1, two
+//!   streams, no coupled streams). Decoders see an ordinary two-channel file,
+//!   but the encoder never mixes the channels, so the microphone never leaks
+//!   into the system channel or the other way round.
+//! - [`Layout::Mono`] (`listen.ogg`): one channel (mapping family 0), the
+//!   mix of both sides for listening.
 //!
 //! Crash safety: a page is closed every second and the file is `fsync`ed, so a
 //! crash or power loss loses at most the last unflushed second.
@@ -48,10 +52,29 @@ fn opus_err(e: opus::Error) -> io::Error {
     io::Error::other(format!("opus: {e}"))
 }
 
+/// Channel layout of an Ogg Opus file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// Microphone (L) and system audio (R) as two independent mono streams.
+    Split,
+    /// One mono channel.
+    Mono,
+}
+
+impl Layout {
+    pub fn channels(self) -> usize {
+        match self {
+            Layout::Split => CHANNELS,
+            Layout::Mono => 1,
+        }
+    }
+}
+
 pub struct PartWriter {
     path: PathBuf,
     w: PacketWriter<'static, BufWriter<File>>,
     enc: MSEncoder,
+    channels: usize,
     serial: u32,
     preskip: u16,
     frames: u64,
@@ -65,10 +88,14 @@ impl PartWriter {
         path: &Path,
         serial: u32,
         cfg: &EncoderConfig,
+        layout: Layout,
         tags: &[(&str, String)],
     ) -> io::Result<Self> {
-        let mut enc = MSEncoder::new(crate::SAMPLE_RATE, 2, 0, &[0, 1], Application::Voip)
-            .map_err(opus_err)?;
+        let mut enc = match layout {
+            Layout::Split => MSEncoder::new(crate::SAMPLE_RATE, 2, 0, &[0, 1], Application::Voip),
+            Layout::Mono => MSEncoder::new(crate::SAMPLE_RATE, 1, 0, &[0], Application::Voip),
+        }
+        .map_err(opus_err)?;
         enc.set_bitrate(Bitrate::Bits(cfg.bitrate))
             .map_err(opus_err)?;
         enc.set_vbr(true).map_err(opus_err)?;
@@ -79,12 +106,18 @@ impl PartWriter {
 
         let file = File::create_new(path)?;
         let mut w = PacketWriter::new(BufWriter::with_capacity(64 * 1024, file));
-        w.write_packet(opus_head(preskip), serial, PacketWriteEndInfo::EndPage, 0)?;
+        w.write_packet(
+            opus_head(preskip, layout),
+            serial,
+            PacketWriteEndInfo::EndPage,
+            0,
+        )?;
         w.write_packet(opus_tags(tags), serial, PacketWriteEndInfo::EndPage, 0)?;
         let mut part = Self {
             path: path.to_path_buf(),
             w,
             enc,
+            channels: layout.channels(),
             serial,
             preskip,
             frames: 0,
@@ -109,7 +142,7 @@ impl PartWriter {
     }
 
     fn encode(&mut self, interleaved: &[f32]) -> io::Result<Vec<u8>> {
-        debug_assert_eq!(interleaved.len(), FRAME_SAMPLES * CHANNELS);
+        debug_assert_eq!(interleaved.len(), FRAME_SAMPLES * self.channels);
         let n = self
             .enc
             .encode_float(interleaved, &mut self.buf)
@@ -117,7 +150,8 @@ impl PartWriter {
         Ok(self.buf[..n].to_vec())
     }
 
-    /// Encodes one 20 ms interleaved stereo frame (`[L, R, L, R, ...]`).
+    /// Encodes one 20 ms frame: interleaved `[L, R, L, R, ...]` for
+    /// [`Layout::Split`], plain samples for [`Layout::Mono`].
     pub fn write_frame(&mut self, interleaved: &[f32]) -> io::Result<()> {
         let packet = self.encode(interleaved)?;
         self.frames += 1;
@@ -140,7 +174,8 @@ impl PartWriter {
     /// carries the encoder look-ahead out); `None` at the end of the session.
     pub fn finish(mut self, next: Option<&[f32]>) -> io::Result<u64> {
         let silence = [0.0f32; FRAME_SAMPLES * CHANNELS];
-        let packet = self.encode(next.unwrap_or(&silence))?;
+        let silence = &silence[..FRAME_SAMPLES * self.channels];
+        let packet = self.encode(next.unwrap_or(silence))?;
         let final_granule = self.preskip as u64 + self.frames * GRANULE_PER_FRAME;
         self.w.write_packet(
             packet,
@@ -160,18 +195,23 @@ impl PartWriter {
     }
 }
 
-fn opus_head(preskip: u16) -> Vec<u8> {
-    let mut h = Vec::with_capacity(21);
+fn opus_head(preskip: u16, layout: Layout) -> Vec<u8> {
+    let mut h = Vec::with_capacity(23);
     h.extend_from_slice(b"OpusHead");
     h.push(1); // version
-    h.push(CHANNELS as u8);
+    h.push(layout.channels() as u8);
     h.extend_from_slice(&preskip.to_le_bytes());
     h.extend_from_slice(&crate::SAMPLE_RATE.to_le_bytes()); // original input rate
     h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    h.push(1); // channel mapping family 1
-    h.push(2); // stream count
-    h.push(0); // coupled stream count
-    h.extend_from_slice(&[0, 1]); // channel 0 ← stream 0, channel 1 ← stream 1
+    match layout {
+        Layout::Split => {
+            h.push(1); // channel mapping family 1
+            h.push(2); // stream count
+            h.push(0); // coupled stream count
+            h.extend_from_slice(&[0, 1]); // channel 0 ← stream 0, channel 1 ← stream 1
+        }
+        Layout::Mono => h.push(0), // channel mapping family 0: mono, no table
+    }
     h
 }
 

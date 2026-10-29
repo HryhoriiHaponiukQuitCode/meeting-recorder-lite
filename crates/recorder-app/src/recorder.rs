@@ -53,6 +53,8 @@ pub enum SystemOption {
 #[derive(Clone, Debug)]
 pub struct RecorderOptions {
     pub root: PathBuf,
+    /// Split the recording into parts of this many seconds (at least 10);
+    /// 0 = one file per session.
     pub part_seconds: u32,
     pub bitrate_kbps: u32,
     pub mic_device: Option<String>,
@@ -79,7 +81,7 @@ pub enum Notice {
     },
     /// No system audio for two minutes while the microphone is active.
     SystemSilent,
-    /// The computer slept; recording continued in a new part.
+    /// The computer slept; recording continued in the same file.
     Resumed {
         slept_s: u64,
     },
@@ -122,7 +124,10 @@ impl Recorder {
         }
         let cfg = SessionConfig {
             root: opts.root.clone(),
-            part_seconds: opts.part_seconds.max(10),
+            part_seconds: match opts.part_seconds {
+                0 => 0,
+                s => s.max(10),
+            },
             encoder: EncoderConfig {
                 bitrate: opts.bitrate_kbps.clamp(24, 64) as i32 * 1000,
                 complexity: 5,
@@ -165,8 +170,8 @@ impl Recorder {
     }
 
     /// Pauses or resumes. Capture keeps running, but nothing is written
-    /// while paused; the recording continues in a new part, and the paused
-    /// time is not filled with silence.
+    /// while paused; the recording continues in the same file, and the
+    /// paused time is not filled with silence.
     pub fn set_paused(&self, paused: bool) {
         self.pause.store(paused, Ordering::SeqCst);
     }
@@ -369,7 +374,7 @@ fn run(
                 discard(&mut mic_c, &mut buf);
                 discard(&mut sys_c, &mut buf);
                 let paused_ms = since.elapsed().as_millis() as u64;
-                tracing::info!(paused_s = paused_ms / 1000, "resumed, starting a new part");
+                tracing::info!(paused_s = paused_ms / 1000, "resumed");
                 if let Err(e) =
                     engine.resume_after_pause(Gap::Pause, before, host_now_ns(), paused_ms)
                 {
@@ -387,7 +392,7 @@ fn run(
         }
         if paused_at.is_some() {
             // Devices may still change while paused; the sleep check is
-            // skipped because the pause already starts a new part.
+            // skipped because the pause already skips the gap.
             while let Ok(ev) = ev_rx.try_recv() {
                 handle_event(&mut engine, &mut states, &opts, &notices, &status, ev);
             }
@@ -400,7 +405,7 @@ fn run(
         }
 
         // A long gap in wall time means the computer slept (or the process
-        // was suspended): continue in a new part without recording the gap.
+        // was suspended): continue in the same file without recording the gap.
         let wall = SystemTime::now();
         let gap = wall.duration_since(last_wall).unwrap_or_default();
         if gap > Duration::from_secs(3) {
@@ -408,7 +413,7 @@ fn run(
             drain(&mut engine, &mut sys_c, SYSTEM, &mut buf);
             tracing::warn!(
                 seconds = gap.as_secs(),
-                "system was asleep, starting a new part"
+                "system was asleep, skipping the gap"
             );
             if let Err(e) = engine.resume_after_pause(
                 Gap::Sleep,
@@ -672,7 +677,7 @@ impl Notice {
                 "System audio has been silent for 2 minutes while the microphone is active. Check the output device.".into()
             }
             Notice::Resumed { slept_s } => {
-                format!("The computer slept for {slept_s} s; recording continued in a new part.")
+                format!("The computer slept for {slept_s} s; recording continued in the same file.")
             }
             Notice::WriteFailed(e) => format!("Cannot write to disk: {e}. Recording stopped."),
         }

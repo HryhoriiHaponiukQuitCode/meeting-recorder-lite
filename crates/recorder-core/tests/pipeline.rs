@@ -11,7 +11,7 @@ use recorder_core::decode::{decode_part, rms_dbfs};
 use recorder_core::engine::Engine;
 use recorder_core::manifest::{Manifest, OsInfo, PartStatus, Status};
 use recorder_core::opus_ogg::EncoderConfig;
-use recorder_core::session::{Gap, SessionConfig, SessionWriter};
+use recorder_core::session::{Gap, LISTEN_FILE, SessionConfig, SessionWriter};
 use recorder_core::{MIC, SYSTEM, recovery};
 
 fn temp_root(name: &str) -> PathBuf {
@@ -208,6 +208,77 @@ fn parts_are_seamless_with_exact_lengths() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// Amplitude of the `freq` component of a 16 kHz signal (a single DFT bin).
+fn tone_amplitude(x: &[f32], freq: f64) -> f64 {
+    let (mut re, mut im) = (0.0, 0.0);
+    for (i, &s) in x.iter().enumerate() {
+        let ph = 2.0 * PI * freq * i as f64 / 16_000.0;
+        re += s as f64 * ph.cos();
+        im += s as f64 * ph.sin();
+    }
+    2.0 * (re * re + im * im).sqrt() / x.len() as f64
+}
+
+/// `listen.ogg` is one mono file for the whole session, even when the
+/// parts rotate, and carries both sides at their recorded level, while the
+/// parts keep the microphone and system audio apart.
+#[test]
+fn listen_file_mixes_both_sides_into_one_channel() {
+    let root = temp_root("listen");
+    let mut engine = new_engine(&root, 2);
+    let dir = engine.session().dir().to_path_buf();
+    let mut sources = [
+        SimSource {
+            channel: MIC,
+            rate: 48_000,
+            drift: 0.0,
+            block: 480,
+            n: 0,
+            gaps: vec![],
+            signal: sine300,
+        },
+        SimSource {
+            channel: SYSTEM,
+            rate: 48_000,
+            drift: 0.0,
+            block: 480,
+            n: 0,
+            gaps: vec![],
+            signal: sine700,
+        },
+    ];
+    simulate(&mut engine, &mut sources, 5.3);
+    let m = engine.finish((5.3e9) as u64).unwrap();
+    assert_eq!(m.parts.len(), 3);
+    assert_eq!(m.listen_file.as_deref(), Some(LISTEN_FILE));
+
+    let mix = decode_part(&dir.join(LISTEN_FILE)).unwrap();
+    assert!(mix.complete);
+    assert!(mix.right.is_empty(), "listen.ogg must be mono");
+    let total: u64 = m.parts.iter().map(|p| p.duration_ms).sum();
+    assert_eq!(mix.left.len() as u64, total * 16);
+
+    // Skip the first second (commit horizon and codec start-up).
+    let steady = &mix.left[16_000..];
+    for (freq, side) in [(300.0, "microphone"), (700.0, "system audio")] {
+        let a = tone_amplitude(steady, freq);
+        assert!(
+            (0.2..0.4).contains(&a),
+            "{side} at {a:.3} in the mix, recorded at 0.3"
+        );
+    }
+    let (_, l, r) = decode_session(&dir);
+    assert!(
+        tone_amplitude(&l[16_000..], 700.0) < 0.01,
+        "parts must stay split"
+    );
+    assert!(
+        tone_amplitude(&r[16_000..], 300.0) < 0.01,
+        "parts must stay split"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
 #[test]
 fn channels_do_not_leak_into_each_other() {
     let root = temp_root("isolation");
@@ -327,7 +398,7 @@ fn channels_stay_aligned_with_drift_and_loopback_silence() {
 #[test]
 fn crash_keeps_flushed_audio_and_recovery_closes_session() {
     let root = temp_root("crash");
-    let mut engine = new_engine(&root, 600);
+    let mut engine = new_engine(&root, 0);
     let dir = engine.session().dir().to_path_buf();
     let mut sources = [SimSource {
         channel: MIC,
@@ -343,12 +414,10 @@ fn crash_keeps_flushed_audio_and_recovery_closes_session() {
     // crash leaves a half-written page at the end of the file.
     drop(engine);
     let part = dir.join("part_0001.ogg");
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&part)
-        .unwrap();
-    std::io::Write::write_all(&mut f, b"OggS\0\0half-written page").unwrap();
-    drop(f);
+    for file in [&part, &dir.join(LISTEN_FILE)] {
+        let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+        std::io::Write::write_all(&mut f, b"OggS\0\0half-written page").unwrap();
+    }
 
     // Not recovered yet: still "recording".
     assert_eq!(Manifest::load(&dir).unwrap().status, Status::Recording);
@@ -360,10 +429,16 @@ fn crash_keeps_flushed_audio_and_recovery_closes_session() {
     // 4.6 s were committed (5 s − 400 ms horizon); the four closed one-second
     // pages survive (minus the 6.5 ms pre-skip), the unclosed 0.6 s is lost.
     assert_eq!(m.parts[0].duration_ms, 3_993);
-    assert_eq!(rec[0].truncated_bytes, 23);
+    // 23 bytes cut from the part and 23 from listen.ogg.
+    assert_eq!(rec[0].truncated_bytes, 46);
     let d = decode_part(&part).unwrap();
     assert!(!d.truncated);
     assert!(d.left.len() as u64 >= m.parts[0].duration_ms * 16 - 320);
+    // The listening mix survives the same way, up to the same page.
+    assert_eq!(m.listen_file.as_deref(), Some(LISTEN_FILE));
+    let mix = decode_part(&dir.join(LISTEN_FILE)).unwrap();
+    assert!(!mix.truncated);
+    assert_eq!(mix.left.len(), d.left.len());
     // Idempotent.
     assert!(recovery::recover_all(&root).is_empty());
     std::fs::remove_dir_all(root).ok();
@@ -374,7 +449,8 @@ fn crash_keeps_flushed_audio_and_recovery_closes_session() {
 #[test]
 fn file_size_per_hour_is_within_budget() {
     let root = temp_root("size");
-    let mut engine = new_engine(&root, 600);
+    // No part limit: the whole session is one file.
+    let mut engine = new_engine(&root, 0);
     let dir = engine.session().dir().to_path_buf();
     fn speechish(t: f64) -> f32 {
         let mut x = (t * 1e4).to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -410,11 +486,19 @@ fn file_size_per_hour_is_within_budget() {
     ];
     let seconds = 60.0;
     simulate(&mut engine, &mut sources, seconds);
-    engine.finish((seconds * 1e9) as u64).unwrap();
+    let m = engine.finish((seconds * 1e9) as u64).unwrap();
+    assert_eq!(m.parts.len(), 1);
+    assert_eq!(m.part_length_s, 0);
     let bytes = std::fs::metadata(dir.join("part_0001.ogg")).unwrap().len() as f64;
     let mb_per_hour = bytes * 3600.0 / seconds / 1e6;
-    println!("estimated size: {mb_per_hour:.1} MB/h");
+    let listen = std::fs::metadata(dir.join(LISTEN_FILE)).unwrap().len() as f64;
+    let listen_mb_per_hour = listen * 3600.0 / seconds / 1e6;
+    println!("estimated size: {mb_per_hour:.1} MB/h, listen.ogg {listen_mb_per_hour:.1} MB/h");
     assert!(mb_per_hour < 16.0, "{mb_per_hour:.1} MB/h");
+    assert!(
+        listen_mb_per_hour < 9.0,
+        "listen.ogg {listen_mb_per_hour:.1} MB/h"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -483,15 +567,14 @@ fn echo_from_speakers_is_removed_when_aec_is_on() {
     );
 }
 
-/// After a sleep the session continues in a new part and the sleep time is
-/// not filled with silence, even if the host clock kept running.
+/// After a sleep the session continues in the same file and the sleep time
+/// is not filled with silence, even if the host clock kept running.
 #[test]
-fn sleep_starts_a_new_part_without_recording_the_gap() {
+fn sleep_continues_the_same_part_without_recording_the_gap() {
     skip_gap(Gap::Sleep, "sleep");
 }
 
-/// A user pause skips the gap the same way but keeps writing the same part,
-/// so a paused call stays one file.
+/// A user pause skips the gap the same way.
 #[test]
 fn pause_continues_the_same_part_without_recording_the_gap() {
     skip_gap(Gap::Pause, "pause");
@@ -499,7 +582,7 @@ fn pause_continues_the_same_part_without_recording_the_gap() {
 
 fn skip_gap(gap: Gap, event: &str) {
     let root = temp_root(event);
-    let mut engine = new_engine(&root, 600);
+    let mut engine = new_engine(&root, 0);
     let dir = engine.session().dir().to_path_buf();
     let block = |engine: &mut Engine, t: f64| {
         let samples: Vec<f32> = (0..480).map(|i| sine300(t + i as f64 / 48_000.0)).collect();
@@ -529,23 +612,15 @@ fn skip_gap(gap: Gap, event: &str) {
         total < 6_000,
         "recorded {total} ms, the gap must not be recorded"
     );
-    let resumed_at = m
+    let gap_event = m
         .events
         .iter()
         .find(|e| e.kind == event)
-        .expect("gap event")
-        .t_ms;
-    if gap == Gap::Sleep {
-        assert_eq!(m.parts.len(), 2);
-        assert_eq!(m.parts[1].start_offset_ms, resumed_at);
-        let wall = m.parts[1].started_at_utc.unwrap() - m.parts[0].started_at_utc.unwrap();
-        assert!(
-            wall.num_seconds() >= 62,
-            "wall-clock start of part 2 is {wall:?} after part 1"
-        );
-    } else {
-        assert_eq!(m.parts.len(), 1, "a pause must not split the file");
-    }
+        .expect("gap event");
+    let resumed_at = gap_event.t_ms;
+    assert_eq!(gap_event.data["duration_ms"], 60_000);
+    assert_eq!(m.parts.len(), 1, "a {event} must not split the file");
+    assert_eq!(m.parts[0].status, PartStatus::Closed);
     let (_, l, _) = decode_session(&dir);
     // The tone runs straight across the resume point: no silence for the gap.
     let p = (resumed_at * 16) as usize;
