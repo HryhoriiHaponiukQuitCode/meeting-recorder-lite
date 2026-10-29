@@ -57,14 +57,24 @@ pub enum TranscriptState {
 }
 
 pub fn transcript_state(session: &Path) -> TranscriptState {
-    match Manifest::load(session).ok().and_then(|m| m.transcript) {
+    match Manifest::load(session) {
+        Ok(m) => transcript_state_of(&m, session),
+        Err(_) => TranscriptState::None,
+    }
+}
+
+/// The same from a manifest already loaded.
+pub fn transcript_state_of(m: &Manifest, session: &Path) -> TranscriptState {
+    match &m.transcript {
         Some(t) => match t.status {
             TranscriptStatus::Done if session.join(TXT_FILE).is_file() => {
                 TranscriptState::Done(session.join(TXT_FILE))
             }
             TranscriptStatus::Done => TranscriptState::None,
             TranscriptStatus::Running => TranscriptState::Running,
-            TranscriptStatus::Failed => TranscriptState::Failed(t.error.unwrap_or_default()),
+            TranscriptStatus::Failed => {
+                TranscriptState::Failed(t.error.clone().unwrap_or_default())
+            }
         },
         None => TranscriptState::None,
     }

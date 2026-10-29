@@ -18,15 +18,15 @@ use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Align, FontId, Layout, RichText, TextureHandle, ViewportCommand, vec2};
 use recorder_app::permissions::{self, Access, Permission};
+use recorder_app::sessions::{self, SessionInfo};
 use recorder_app::settings::Settings;
 use recorder_app::transcription::{
     self, JobOutcome, ModelDownload, Phase, TranscriptState, TranscriptionJob,
 };
 use recorder_app::{
-    APP_NAME, AecMode, CONSENT_REMINDER, Manifest, Monitor, Notice, Recorder, RecorderOptions,
-    Status, SystemOption, logging, paths,
+    APP_NAME, AecMode, CONSENT_REMINDER, Monitor, Notice, Recorder, RecorderOptions, Status,
+    SystemOption, logging, paths,
 };
-use recorder_core::manifest::Status as SessionStatus;
 use recorder_transcribe::model::ModelStatus;
 
 /// How long the channel check listens.
@@ -53,6 +53,7 @@ const REVEAL: &str = "Show in Explorer";
 enum View {
     Main,
     Settings,
+    Recordings,
 }
 
 struct Message {
@@ -85,8 +86,13 @@ struct LastRecording {
 enum TranscriptAction {
     Start(PathBuf),
     Stop,
+    /// Take a waiting recording off the queue.
+    Unqueue(PathBuf),
     Open(PathBuf),
+    Reveal(PathBuf),
     SetUp,
+    /// Open the list of recordings.
+    List,
 }
 
 /// Hidden developer options (`--smoke-test`, `--screenshot`, …).
@@ -143,6 +149,8 @@ struct App {
     model_status: ModelStatus,
     model_size: u64,
     last_transcript: TranscriptState,
+    /// All recordings, for the list (refreshed while it is shown).
+    sessions: Vec<SessionInfo>,
     disk_checked: Instant,
 }
 
@@ -156,7 +164,11 @@ impl App {
             egui::TextureOptions::LINEAR,
         );
         let settings = Settings::load();
-        let last = latest_session(&settings.recordings_dir());
+        let last = sessions::latest(&settings.recordings_dir()).map(|s| LastRecording {
+            dir: s.dir,
+            started: s.started,
+            seconds: s.seconds,
+        });
         let mut app = Self {
             view: dev.view.unwrap_or(View::Main),
             recorder: None,
@@ -188,6 +200,7 @@ impl App {
             model_status: ModelStatus::Missing,
             model_size: 0,
             last_transcript: TranscriptState::None,
+            sessions: Vec::new(),
             disk_checked: Instant::now(),
             settings,
         };
@@ -484,6 +497,10 @@ impl App {
         self.last_transcript = self.last.as_ref().map_or(TranscriptState::None, |l| {
             transcription::transcript_state(&l.dir)
         });
+        // The list reads every manifest, so only while it is on screen.
+        if self.view == View::Recordings {
+            self.sessions = sessions::list(&self.settings.recordings_dir());
+        }
         self.disk_checked = Instant::now();
     }
 
@@ -874,8 +891,8 @@ impl App {
                 ui::card_header(ui, "Recordings", |_| {});
                 ui.label(ui::muted("Your last recording will appear here."));
                 ui.add_space(ui::S1);
-                if ui::link(ui, "Open recordings folder").clicked() {
-                    paths::open_in_file_manager(&self.settings.recordings_dir());
+                if ui::link(ui, "All recordings").clicked() {
+                    action = Some(TranscriptAction::List);
                 }
                 return;
             };
@@ -896,89 +913,117 @@ impl App {
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui::link(ui, "All recordings").clicked() {
-                        paths::open_in_file_manager(&self.settings.recordings_dir());
+                        action = Some(TranscriptAction::List);
                     }
                 });
             });
             ui.add_space(ui::S3);
             ui::divider(ui);
             ui.add_space(ui::S3);
-            action = self.transcript_row(ui, &last.dir);
+            if let Some(a) = self.transcript_row(ui, &last.dir) {
+                action = Some(a);
+            }
         });
+        if let Some(a) = action {
+            self.apply(a);
+        }
+    }
+
+    fn apply(&mut self, action: TranscriptAction) {
         match action {
-            Some(TranscriptAction::Start(dir)) => {
+            TranscriptAction::Start(dir) => {
                 self.message = None;
                 self.enqueue(dir);
                 self.pump_transcription();
             }
-            Some(TranscriptAction::Stop) => {
+            TranscriptAction::Stop => {
                 if let Some(job) = self.job.take() {
                     job.cancel();
                 }
                 self.check_disk();
             }
-            Some(TranscriptAction::Open(path)) => paths::open_file(&path),
-            Some(TranscriptAction::SetUp) => self.view = View::Settings,
-            None => {}
+            TranscriptAction::Unqueue(dir) => self.queue.retain(|d| *d != dir),
+            TranscriptAction::Open(path) => paths::open_file(&path),
+            TranscriptAction::Reveal(dir) => paths::open_in_file_manager(&dir),
+            TranscriptAction::SetUp => self.view = View::Settings,
+            TranscriptAction::List => {
+                self.view = View::Recordings;
+                self.check_disk();
+            }
         }
+    }
+
+    /// Transcript buttons for one recording, laid out right to left:
+    /// Transcribe / progress and Stop / Queued / Open / Try again / Set up.
+    fn transcript_controls(
+        &self,
+        ui: &mut egui::Ui,
+        dir: &Path,
+        state: &TranscriptState,
+    ) -> Option<TranscriptAction> {
+        let mut action = None;
+        let job = self.job.as_ref().filter(|j| j.session() == dir);
+        if let Some(job) = job {
+            if ui::outline_small(ui, "Stop", Some((ui::Icon::Stop, ui::RED))).clicked() {
+                action = Some(TranscriptAction::Stop);
+            }
+            let st = job.state();
+            let text = if st.started && st.total_s > 0.0 {
+                format!("{:.0}%", st.done_s / st.total_s * 100.0)
+            } else {
+                "Starting…".into()
+            };
+            ui::pill(ui, &text, ui::Tone::Blue, true);
+        } else if self.queue.iter().any(|d| d == dir) {
+            if ui::outline_small(ui, "Cancel", None).clicked() {
+                action = Some(TranscriptAction::Unqueue(dir.to_path_buf()));
+            }
+            ui::pill(ui, "Queued", ui::Tone::Grey, false);
+        } else if let TranscriptState::Done(path) = state {
+            if ui::outline_small(ui, "Open", Some((ui::Icon::Arrow, ui::BLUE))).clicked() {
+                action = Some(TranscriptAction::Open(path.clone()));
+            }
+        } else if self.model_status != ModelStatus::Ready {
+            if ui::outline_small(ui, "Set up", None).clicked() {
+                action = Some(TranscriptAction::SetUp);
+            }
+        } else if let TranscriptState::Failed(e) = state {
+            if ui::outline_small(ui, "Try again", None)
+                .on_hover_text(e)
+                .clicked()
+            {
+                action = Some(TranscriptAction::Start(dir.to_path_buf()));
+            }
+        } else {
+            // `Running` without a job here: another process or an
+            // interrupted run; starting resumes it.
+            if ui::outline_small(ui, "Transcribe", Some((ui::Icon::Wave, ui::BLUE))).clicked() {
+                action = Some(TranscriptAction::Start(dir.to_path_buf()));
+            }
+        }
+        action
+    }
+
+    /// Progress of the running transcription of `dir`, if any.
+    fn job_progress(&self, dir: &Path) -> Option<f32> {
+        let job = self.job.as_ref().filter(|j| j.session() == dir)?;
+        let st = job.state();
+        Some((st.done_s / st.total_s.max(1e-9)) as f32)
     }
 
     /// Transcript of the last recording: start, progress, open.
     fn transcript_row(&self, ui: &mut egui::Ui, dir: &Path) -> Option<TranscriptAction> {
         let mut action = None;
-        let job = self.job.as_ref().filter(|j| j.session() == dir);
         let queued = self.queue.iter().any(|d| d == dir);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Transcript").font(FontId::new(14.0, ui::medium())));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(job) = job {
-                    if ui::outline_small(ui, "Stop", Some((ui::Icon::Stop, ui::RED))).clicked() {
-                        action = Some(TranscriptAction::Stop);
-                    }
-                    let st = job.state();
-                    let text = if st.started && st.total_s > 0.0 {
-                        format!("{:.0}%", st.done_s / st.total_s * 100.0)
-                    } else {
-                        "Starting…".into()
-                    };
-                    ui::pill(ui, &text, ui::Tone::Blue, true);
-                } else if queued {
-                    ui::pill(ui, "Queued", ui::Tone::Grey, false);
-                } else if self.model_status != ModelStatus::Ready {
-                    if ui::outline_small(ui, "Set up", None).clicked() {
-                        action = Some(TranscriptAction::SetUp);
-                    }
-                } else {
-                    match &self.last_transcript {
-                        TranscriptState::Done(path) => {
-                            if ui::outline_small(ui, "Open", Some((ui::Icon::Arrow, ui::BLUE)))
-                                .clicked()
-                            {
-                                action = Some(TranscriptAction::Open(path.clone()));
-                            }
-                        }
-                        TranscriptState::Failed(_) => {
-                            if ui::outline_small(ui, "Try again", None).clicked() {
-                                action = Some(TranscriptAction::Start(dir.to_path_buf()));
-                            }
-                        }
-                        // `Running` without a job here: another process or an
-                        // interrupted run; starting resumes it.
-                        TranscriptState::None | TranscriptState::Running => {
-                            if ui::outline_small(ui, "Transcribe", Some((ui::Icon::Wave, ui::BLUE)))
-                                .clicked()
-                            {
-                                action = Some(TranscriptAction::Start(dir.to_path_buf()));
-                            }
-                        }
-                    }
-                }
+                action = self.transcript_controls(ui, dir, &self.last_transcript);
             });
         });
-        let hint = if let Some(job) = job {
-            let st = job.state();
+        let hint = if let Some(p) = self.job_progress(dir) {
             ui.add_space(ui::S1);
-            ui::progress(ui, (st.done_s / st.total_s.max(1e-9)) as f32);
+            ui::progress(ui, p);
             "Runs in the background at low priority and pauses while you record.".to_string()
         } else if queued && self.recorder.is_some() {
             "Starts when the recording ends.".into()
@@ -1013,6 +1058,111 @@ impl App {
         self.channels(ui);
         ui.add_space(ui::S3);
         self.last_recording(ui);
+    }
+
+    // ── Recordings screen ──────────────────────────────────────────────
+
+    fn recordings_screen(&mut self, ui: &mut egui::Ui) {
+        let mut action = None;
+        ui.horizontal(|ui| {
+            if ui::icon_button(ui, ui::Icon::Back, "Back").clicked() {
+                self.view = View::Main;
+            }
+            ui.add_space(ui::S1);
+            ui.label(
+                RichText::new("Recordings")
+                    .font(FontId::new(18.0, ui::bold()))
+                    .color(ui::INK),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui::icon_button(ui, ui::Icon::Folder, "Open the recordings folder").clicked() {
+                    action = Some(TranscriptAction::Reveal(self.settings.recordings_dir()));
+                }
+            });
+        });
+        ui.add_space(ui::S4);
+        ui::card(ui, |ui| {
+            let count = self.sessions.len();
+            ui::card_header(ui, "All recordings", |ui| {
+                if count > 0 {
+                    ui.label(ui::muted(count.to_string()));
+                }
+            });
+            if count == 0 {
+                ui.label(ui::muted(
+                    "No recordings yet. They appear here when you press Stop.",
+                ));
+                return;
+            }
+            if self.model_status != ModelStatus::Ready {
+                ui.label(ui::muted(
+                    "To transcribe, download the speech model once in Settings.",
+                ));
+                ui.add_space(ui::S2);
+            }
+            for (i, s) in self.sessions.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(ui::S2);
+                    ui::divider(ui);
+                    ui.add_space(ui::S2);
+                }
+                if let Some(a) = self.session_row(ui, s) {
+                    action = Some(a);
+                }
+            }
+        });
+        if let Some(a) = action {
+            self.apply(a);
+        }
+    }
+
+    /// One recording: when, how long, transcript state and its button.
+    fn session_row(&self, ui: &mut egui::Ui, s: &SessionInfo) -> Option<TranscriptAction> {
+        let mut action = None;
+        let busy = self.job.as_ref().is_some_and(|j| j.session() == s.dir);
+        let queued = self.queue.contains(&s.dir);
+        let state = match (&s.transcript, busy, queued) {
+            _ if s.recording => "recording now",
+            _ if s.seconds == 0 => "no audio",
+            (_, true, _) => "transcribing",
+            (_, _, true) => "waiting",
+            (TranscriptState::Done(_), ..) => "transcript ready",
+            // Short: the row also holds a button and the folder icon.
+            (TranscriptState::Failed(_), ..) => "failed",
+            (TranscriptState::Running, ..) => "interrupted",
+            (TranscriptState::None, ..) => "no transcript",
+        };
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(
+                    RichText::new(when(s.started))
+                        .font(FontId::new(14.0, ui::medium()))
+                        .color(ui::INK),
+                );
+                ui.label(ui::muted(format!(
+                    "{} · {state}",
+                    duration_words(s.seconds)
+                )));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if !busy && !queued && ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
+                    action = Some(TranscriptAction::Reveal(s.dir.clone()));
+                }
+                if s.recording {
+                    ui::pill(ui, "Recording", ui::Tone::Red, true);
+                } else if s.transcribable() {
+                    action = self
+                        .transcript_controls(ui, &s.dir, &s.transcript)
+                        .or(action.take());
+                }
+            });
+        });
+        if let Some(p) = self.job_progress(&s.dir) {
+            ui.add_space(ui::S1);
+            ui::progress(ui, p);
+        }
+        action
     }
 
     // ── Settings screen ────────────────────────────────────────────────
@@ -1398,6 +1548,7 @@ impl eframe::App for App {
                         .show(ui, |ui| match self.view {
                             View::Main => self.main_screen(ui),
                             View::Settings => self.settings_screen(ui),
+                            View::Recordings => self.recordings_screen(ui),
                         });
                 });
             });
@@ -1455,30 +1606,6 @@ fn current_permissions() -> Vec<(Permission, Access)> {
         .iter()
         .map(|&p| (p, permissions::status(p)))
         .collect()
-}
-
-/// The newest finished session in the recordings folder (folder names start
-/// with the date and time), so the last recording shows after a restart.
-fn latest_session(root: &Path) -> Option<LastRecording> {
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    dirs.into_iter().rev().find_map(|dir| {
-        let m = Manifest::load(&dir).ok()?;
-        if m.status == SessionStatus::Recording || m.parts.is_empty() {
-            return None;
-        }
-        let seconds = m.parts.iter().map(|p| p.duration_ms).sum::<u64>() / 1000;
-        Some(LastRecording {
-            dir,
-            started: m.started_at_utc,
-            seconds,
-        })
-    })
 }
 
 /// The path with the home folder shown as `~`.
@@ -1576,7 +1703,11 @@ fn dev_options() -> DevOptions {
         }),
         screenshot: value("--screenshot").map(PathBuf::from),
         screenshot_at: value("--screenshot-at").and_then(|v| v.parse().ok()),
-        view: value("--view").and_then(|v| (v == "settings").then_some(View::Settings)),
+        view: value("--view").and_then(|v| match v.as_str() {
+            "settings" => Some(View::Settings),
+            "recordings" => Some(View::Recordings),
+            _ => None,
+        }),
         window_height: value("--window-height").and_then(|v| v.parse().ok()),
         scroll: value("--scroll").and_then(|v| v.parse().ok()),
         transcribe: args.iter().any(|a| a == "--transcribe"),

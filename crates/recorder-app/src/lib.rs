@@ -8,6 +8,7 @@ pub mod paths;
 pub mod permissions;
 pub mod procstat;
 mod recorder;
+pub mod sessions;
 pub mod settings;
 pub mod transcription;
 

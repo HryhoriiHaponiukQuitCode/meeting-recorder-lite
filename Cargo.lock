@@ -2595,6 +2595,7 @@ name = "recorder-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "libc",
  "os_info",
@@ -2606,6 +2607,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "windows",
 ]
 
