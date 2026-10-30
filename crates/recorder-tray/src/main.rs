@@ -546,6 +546,7 @@ impl App {
             &self.settings.models_dir(),
             self.settings.transcription_threads(),
             self.settings.transcription_quality(),
+            self.settings.tell_voices_apart,
         ) {
             Ok(job) => self.job = Some(job),
             Err(e) => {
@@ -1390,7 +1391,7 @@ impl App {
                     "Once. About 1.5 GB on disk and up to 2 GB of memory while transcribing."
                 }
                 Quality::Fast => {
-                    "Once. Takes about 640 MB on disk and 1.5 GB of memory while transcribing."
+                    "Once. Takes about 670 MB on disk and 1.5 GB of memory while transcribing."
                 }
             }));
         }
@@ -1427,6 +1428,21 @@ impl App {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui::toggle(ui, &mut self.settings.transcribe_automatically).changed() {
+                    self.save_settings();
+                }
+            });
+        });
+        ui.add_space(ui::S3);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new("Tell voices apart").font(FontId::new(14.0, ui::medium())));
+                ui.label(ui::muted(
+                    "Others 1, Others 2… for different people on the call",
+                ));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui::toggle(ui, &mut self.settings.tell_voices_apart).changed() {
                     self.save_settings();
                 }
             });

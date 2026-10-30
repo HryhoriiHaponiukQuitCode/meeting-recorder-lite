@@ -34,6 +34,46 @@ fn path(p: &std::path::Path) -> Result<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+fn vad_config(vad: &std::path::Path) -> Result<VadModelConfig> {
+    let s = vad_settings();
+    Ok(VadModelConfig {
+        silero_vad: SileroVadModelConfig {
+            model: Some(path(vad)?),
+            threshold: s.threshold,
+            min_silence_duration: s.min_silence_s,
+            min_speech_duration: s.min_speech_s,
+            window_size: VAD_WINDOW as i32,
+            max_speech_duration: s.max_speech_s,
+        },
+        sample_rate: SAMPLE_RATE as i32,
+        num_threads: 1,
+        provider: Some("cpu".into()),
+        ..Default::default()
+    })
+}
+
+/// Speech segments `(start, length)` in samples of one signal, found the
+/// same way as for recognition (checks).
+pub fn speech_segments(vad: &std::path::Path, samples: &[f32]) -> Result<Vec<(u64, usize)>> {
+    let det = VoiceActivityDetector::create(&vad_config(vad)?, VAD_MAX_SPEECH_S + 60.0)
+        .context("cannot load the voice activity detector")?;
+    let mut out = Vec::new();
+    let mut take = |det: &VoiceActivityDetector| {
+        while let Some(seg) = det.front() {
+            out.push((seg.start() as u64, seg.samples().len()));
+            drop(seg);
+            det.pop();
+        }
+    };
+    for window in samples.as_chunks::<VAD_WINDOW>().0 {
+        det.accept_waveform(window);
+        take(&det);
+    }
+    det.flush();
+    take(&det);
+    Ok(out)
+}
+
 pub struct Engine {
     recognizer: OfflineRecognizer,
     vad_config: VadModelConfig,
@@ -54,24 +94,9 @@ impl Engine {
         cfg.decoding_method = Some("greedy_search".into());
         let recognizer = OfflineRecognizer::create(&cfg)
             .context("cannot load the speech model (damaged files or not enough memory)")?;
-        let s = vad_settings();
-        let vad_config = VadModelConfig {
-            silero_vad: SileroVadModelConfig {
-                model: Some(path(&paths.vad)?),
-                threshold: s.threshold,
-                min_silence_duration: s.min_silence_s,
-                min_speech_duration: s.min_speech_s,
-                window_size: VAD_WINDOW as i32,
-                max_speech_duration: s.max_speech_s,
-            },
-            sample_rate: SAMPLE_RATE as i32,
-            num_threads: 1,
-            provider: Some("cpu".into()),
-            ..Default::default()
-        };
         Ok(Self {
             recognizer,
-            vad_config,
+            vad_config: vad_config(&paths.vad)?,
         })
     }
 

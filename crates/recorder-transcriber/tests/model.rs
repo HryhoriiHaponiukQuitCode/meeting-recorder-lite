@@ -210,10 +210,21 @@ fn transcribe_with(
     stop: &AtomicBool,
     on: &mut dyn FnMut(&Message),
 ) -> anyhow::Result<Vec<String>> {
+    transcribe_opts(dir, quality, false, stop, on)
+}
+
+fn transcribe_opts(
+    dir: &Path,
+    quality: Quality,
+    voices: bool,
+    stop: &AtomicBool,
+    on: &mut dyn FnMut(&Message),
+) -> anyhow::Result<Vec<String>> {
     let opts = Options {
         model_dir: model_dir(),
         threads: THREADS,
         quality,
+        voices,
     };
     pipeline::transcribe_session(dir, &opts, &mut |m| on(&m), stop)
 }
@@ -502,5 +513,104 @@ fn best_quality_restores_what_whisper_skipped() {
             assert!(t.contains(m), "{file}: «{m}» missing in {t}");
         }
     }
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Four people one after the other on the system audio: the three
+/// LibriSpeech readers of the English test file (two clips each; speakers
+/// and durations from `english-source.json` next to it), then the
+/// Ukrainian voice message.
+///
+/// No voice may hold two people, and every clip stays on one voice. One
+/// reader's two clips come from different recording sessions and are 0.65
+/// apart for the voice model (different people: 0.75 and more), so they
+/// may get two numbers; within one call that does not happen.
+#[test]
+#[ignore = "needs the models"]
+fn voices_tell_people_apart() {
+    let en_path = PathBuf::from(std::env::var_os("MR_TEST_EN_WAV").expect("MR_TEST_EN_WAV"));
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(en_path.with_file_name("english-source.json")).expect("english-source.json"),
+    )
+    .unwrap();
+    // (start, end, clip, person) on the timeline; 0.5 s between clips.
+    let mut truth: Vec<(f64, f64, String, String)> = Vec::new();
+    let mut t = 0.0;
+    for clip in meta["utterances"].as_array().unwrap() {
+        let d = clip["duration_seconds"].as_f64().unwrap();
+        let id = clip["id"].as_str().unwrap().to_string();
+        let person = clip["speaker_id"].as_str().unwrap().to_string();
+        truth.push((t, t + d, id, person));
+        t += d + 0.5;
+    }
+    let en = wav("MR_TEST_EN_WAV");
+    let ua = wav("MR_TEST_UA_WAV");
+    let mut right = en.clone();
+    right.extend(vec![0.0; 16_000 * 3]);
+    let switch = right.len() as f64 / 16_000.0;
+    truth.push((switch, switch + 120.0, "ua".into(), "ua".into()));
+    right.extend_from_slice(&ua[..16_000 * 120]);
+    let left = vec![0.0; right.len()];
+    let root = temp_root("voices");
+    let dir = make_session(&root, 60, &left, &right);
+    transcribe_opts(
+        &dir,
+        Quality::Fast,
+        true,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
+    let d = document(&dir);
+    let mut by_clip: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+    let mut by_voice: std::collections::BTreeMap<u32, Vec<String>> = Default::default();
+    for u in d.utterances.iter().filter(|u| u.speaker == Speaker::Others) {
+        for w in &u.words {
+            let mid = (w.start + w.end) / 2.0;
+            let Some((_, _, clip, person)) = truth
+                .iter()
+                .find(|(a, b, _, _)| *a - 0.3 <= mid && mid <= *b + 0.3)
+            else {
+                continue;
+            };
+            let v = w.voice.expect("every word has a voice");
+            by_clip.entry(clip.clone()).or_default().push(v);
+            by_voice.entry(v).or_default().push(person.clone());
+        }
+    }
+    let top = |xs: &[u32]| {
+        let mut c: std::collections::BTreeMap<u32, usize> = Default::default();
+        for x in xs {
+            *c.entry(*x).or_default() += 1;
+        }
+        c.into_iter().max_by_key(|x| x.1).unwrap()
+    };
+    println!("{} voices", d.others_voices);
+    for (clip, vs) in &by_clip {
+        let (v, n) = top(vs);
+        println!("clip {clip}: voice {v}, {n} of {} words", vs.len());
+        assert!(
+            n as f64 >= 0.9 * vs.len() as f64,
+            "clip {clip} split: {vs:?}"
+        );
+    }
+    for (v, people) in &by_voice {
+        let main = people.iter().filter(|p| **p == people[0]).count();
+        let mut distinct = people.clone();
+        distinct.sort();
+        distinct.dedup();
+        println!("voice {v}: {distinct:?}");
+        assert!(
+            distinct.len() == 1 || main as f64 >= 0.97 * people.len() as f64,
+            "voice {v} holds {distinct:?}"
+        );
+    }
+    assert!((4..=5).contains(&d.others_voices), "{}", d.others_voices);
+    // In order of appearance: the first reader is Others 1, the second 2.
+    assert_eq!(top(&by_clip["1272-128104-0004"]).0, 1);
+    assert_eq!(top(&by_clip["1462-170138-0024"]).0, 2);
+    let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
+    assert!(txt.contains("] Others 1: ") && txt.contains("] Others 4: "));
+    assert!(!txt.contains("] Others: "));
     std::fs::remove_dir_all(root).ok();
 }

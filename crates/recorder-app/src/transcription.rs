@@ -182,6 +182,7 @@ impl TranscriptionJob {
         models_dir: &Path,
         threads: u32,
         quality: Quality,
+        voices: bool,
     ) -> io::Result<Self> {
         let mut cmd = Command::new(helper_path()?);
         cmd.arg("session")
@@ -196,6 +197,9 @@ impl TranscriptionJob {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if !voices {
+            cmd.arg("--no-voices");
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -203,7 +207,7 @@ impl TranscriptionJob {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn()?;
-        tracing::info!(session = %session.display(), threads, quality = quality.as_str(), "transcription started");
+        tracing::info!(session = %session.display(), threads, quality = quality.as_str(), voices, "transcription started");
         let state = Arc::new(Mutex::new(JobState::default()));
         if let Some(out) = child.stdout.take() {
             let state = state.clone();

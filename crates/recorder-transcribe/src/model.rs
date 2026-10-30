@@ -1,8 +1,9 @@
 //! The speech models and which of them each [`Quality`] needs:
 //!
 //! - **Fast** (every system): NVIDIA Parakeet TDT 0.6B v3 (INT8, sherpa-onnx
-//!   export, CC-BY-4.0) and the silero voice activity detector (MIT),
-//!   640 MiB.
+//!   export, CC-BY-4.0), the silero voice activity detector (MIT) and the
+//!   3D-Speaker CAM++ voice-print model that tells the voices of the system
+//!   audio apart (Apache-2.0, 27 MiB), 667 MiB.
 //! - **Best** (macOS): the same plus OpenAI Whisper large-v3-turbo (Q8,
 //!   ggml for whisper.cpp, MIT), 834 MiB, run on the GPU through Metal. The
 //!   transcript takes Whisper's words and fills what Whisper skipped from
@@ -14,6 +15,7 @@
 //! ```text
 //! models/
 //!   silero_vad.onnx
+//!   3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
 //!   sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/
 //!     encoder.int8.onnx  decoder.int8.onnx  joiner.int8.onnx  tokens.txt
 //!   ggml-large-v3-turbo-q8_0.bin           (Best only)
@@ -39,8 +41,8 @@ pub const ASR_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
 pub const MODEL_NAME: &str = ASR_DIR;
 pub const WHISPER_MODEL_NAME: &str = "whisper-large-v3-turbo-q8_0";
 pub const ATTRIBUTION: &str = "Speech recognition: NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0), \
-OpenAI Whisper large-v3-turbo (MIT, macOS), silero VAD (MIT), sherpa-onnx (Apache-2.0), \
-whisper.cpp (MIT), ONNX Runtime (MIT).";
+OpenAI Whisper large-v3-turbo (MIT, macOS), silero VAD (MIT), 3D-Speaker CAM++ voices \
+(Apache-2.0), sherpa-onnx (Apache-2.0), whisper.cpp (MIT), ONNX Runtime (MIT).";
 
 /// How the transcript is made.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -131,6 +133,15 @@ pub const VAD_FILE: ModelFile = ModelFile {
 pub const VAD_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
 
+/// Voice prints for telling the voices of the system audio apart.
+pub const VOICE_FILE: ModelFile = ModelFile {
+    name: "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+    size: 28_281_164,
+    sha256: "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+};
+pub const VOICE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx";
+pub const VOICE_MODEL_NAME: &str = "3dspeaker-campplus-zh-en-advanced";
+
 const ARCHIVE_NAME: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
 pub const ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
 const ARCHIVE_SIZE: u64 = 487_170_055;
@@ -148,6 +159,7 @@ pub const WHISPER_URL: &str =
 pub fn download_size(quality: Quality) -> u64 {
     ARCHIVE_SIZE
         + VAD_FILE.size
+        + VOICE_FILE.size
         + if quality.needs_whisper() {
             WHISPER_FILE.size
         } else {
@@ -166,6 +178,7 @@ pub struct ModelPaths {
     pub joiner: PathBuf,
     pub tokens: PathBuf,
     pub vad: PathBuf,
+    pub voice: PathBuf,
     /// Used by [`Quality::Best`] only.
     pub whisper: PathBuf,
 }
@@ -179,6 +192,7 @@ impl ModelPaths {
             joiner: asr.join(ASR_FILES[2].name),
             tokens: asr.join(ASR_FILES[3].name),
             vad: dir.join(VAD_FILE.name),
+            voice: dir.join(VOICE_FILE.name),
             whisper: dir.join(WHISPER_FILE.name),
         }
     }
@@ -202,7 +216,10 @@ fn all_files(dir: &Path, quality: Quality) -> impl Iterator<Item = (PathBuf, Mod
     ASR_FILES
         .into_iter()
         .map(move |f| (asr.join(f.name), f))
-        .chain(std::iter::once((dir.join(VAD_FILE.name), VAD_FILE)))
+        .chain([
+            (dir.join(VAD_FILE.name), VAD_FILE),
+            (dir.join(VOICE_FILE.name), VOICE_FILE),
+        ])
         .chain(whisper)
 }
 
@@ -227,8 +244,10 @@ pub fn status(dir: &Path, quality: Quality) -> ModelStatus {
 pub fn missing_bytes(dir: &Path, quality: Quality) -> u64 {
     let asr = dir.join(ASR_DIR);
     let mut n = 0;
-    if !size_ok(&dir.join(VAD_FILE.name), &VAD_FILE) {
-        n += VAD_FILE.size;
+    for f in [VAD_FILE, VOICE_FILE] {
+        if !size_ok(&dir.join(f.name), &f) {
+            n += f.size;
+        }
     }
     if !ASR_FILES.iter().all(|f| size_ok(&asr.join(f.name), f)) {
         n += ARCHIVE_SIZE;
@@ -252,6 +271,7 @@ pub fn disk_size(dir: &Path) -> u64 {
     }
     walk(&dir.join(ASR_DIR))
         + walk(&dir.join(VAD_FILE.name))
+        + walk(&dir.join(VOICE_FILE.name))
         + walk(&dir.join(WHISPER_FILE.name))
         + walk(&dir.join(WORK_DIR))
 }
@@ -305,7 +325,7 @@ pub fn delete(dir: &Path) -> io::Result<()> {
             fs::remove_dir_all(&p)?;
         }
     }
-    for f in [VAD_FILE, WHISPER_FILE] {
+    for f in [VAD_FILE, VOICE_FILE, WHISPER_FILE] {
         let p = dir.join(f.name);
         if p.exists() {
             fs::remove_file(p)?;
@@ -450,15 +470,20 @@ pub fn download(
     fs::create_dir_all(&work)?;
     let total = download_size(quality);
 
-    let vad = dir.join(VAD_FILE.name);
-    if !size_ok(&vad, &VAD_FILE) || check_hash(&vad, VAD_FILE.sha256).is_err() {
-        let part = work.join(VAD_FILE.name);
-        fetch(VAD_URL, &part, VAD_FILE.size, (0, total), progress, cancel)?;
-        if let Err(e) = check_hash(&part, VAD_FILE.sha256) {
-            let _ = fs::remove_file(&part);
-            return Err(e);
+    // The two small single files first.
+    let mut before = 0;
+    for (f, url) in [(VAD_FILE, VAD_URL), (VOICE_FILE, VOICE_URL)] {
+        let dest = dir.join(f.name);
+        if !size_ok(&dest, &f) || check_hash(&dest, f.sha256).is_err() {
+            let part = work.join(f.name);
+            fetch(url, &part, f.size, (before, total), progress, cancel)?;
+            if let Err(e) = check_hash(&part, f.sha256) {
+                let _ = fs::remove_file(&part);
+                return Err(e);
+            }
+            fs::rename(&part, &dest)?;
         }
-        fs::rename(&part, &vad)?;
+        before += f.size;
     }
 
     let asr = dir.join(ASR_DIR);
@@ -471,7 +496,7 @@ pub fn download(
             ARCHIVE_URL,
             &archive,
             ARCHIVE_SIZE,
-            (VAD_FILE.size, total),
+            (before, total),
             progress,
             cancel,
         )?;
@@ -487,7 +512,7 @@ pub fn download(
         }
         progress(DownloadProgress {
             phase: Phase::Unpacking,
-            done: VAD_FILE.size + ARCHIVE_SIZE,
+            done: before + ARCHIVE_SIZE,
             total,
         });
         let unpack = work.join("unpack");
@@ -537,7 +562,7 @@ pub fn download(
             WHISPER_URL,
             &part,
             WHISPER_FILE.size,
-            (VAD_FILE.size + ARCHIVE_SIZE, total),
+            (before + ARCHIVE_SIZE, total),
             progress,
             cancel,
         )?;

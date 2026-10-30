@@ -24,13 +24,16 @@ use recorder_transcribe::chunk::{Chunk, Chunker, MAX_CHUNK_SECONDS};
 #[cfg(target_os = "macos")]
 use recorder_transcribe::hybrid::{self, Region};
 use recorder_transcribe::model::{self, ModelPaths, ModelStatus, Quality};
-use recorder_transcribe::output::{self, Document, FORMAT_VERSION, Settings, Speakers};
+use recorder_transcribe::output::{
+    self, Document, FORMAT_VERSION, Settings, Speakers, VoiceSettings,
+};
 use recorder_transcribe::protocol::Message;
 use recorder_transcribe::transcript::{self, ChunkResult, Utterance, Word};
-use recorder_transcribe::{SAMPLE_RATE, Speaker, dialog};
+use recorder_transcribe::{SAMPLE_RATE, Speaker, dialog, voices};
 use sherpa_onnx::VoiceActivityDetector;
 
 use crate::engine::{Engine, VAD_WINDOW, vad_settings};
+use crate::voices::Embedder;
 
 /// Reported when the run was stopped on request.
 #[derive(Debug)]
@@ -168,6 +171,8 @@ pub struct Options {
     pub model_dir: PathBuf,
     pub threads: u32,
     pub quality: Quality,
+    /// Tell the voices of the system audio apart (Others 1, 2, …).
+    pub voices: bool,
 }
 
 fn settings(opts: &Options) -> Settings {
@@ -182,6 +187,7 @@ fn settings(opts: &Options) -> Settings {
         vad: vad_settings(),
         chunking: "speech segments joined without pauses".into(),
         max_chunk_speech_s: MAX_CHUNK_SECONDS as u32,
+        voices: opts.voices.then(VoiceSettings::current),
     }
 }
 
@@ -299,6 +305,19 @@ pub fn transcribe_session(
     }
 }
 
+/// Both channels of a session on its timeline, silence for missing parts
+/// (diarization checks).
+pub fn load_channels(dir: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
+    let manifest = Manifest::load(dir)?;
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    stream_session(dir, &manifest, &AtomicBool::new(false), &mut |l, r, _| {
+        left.extend_from_slice(l);
+        right.extend_from_slice(r);
+        Ok(())
+    })?;
+    Ok((left, right))
+}
+
 /// Receives `(left, right, timeline position)` blocks.
 type BlockFn<'a> = dyn FnMut(&[f32], &[f32], u64) -> Result<()> + 'a;
 
@@ -397,9 +416,29 @@ impl Progress {
     }
 }
 
-/// Share of the time the Parakeet pass takes in the Best quality (Whisper
-/// is about 3-4 times slower).
-const PARAKEET_SHARE_BEST: f64 = 0.25;
+/// How the progress bar is split between the passes, from measured times:
+/// Whisper takes about 3 times as long as Parakeet; the voice prints about
+/// half as long as Parakeet (a minute per hour of call on 2 threads).
+struct Shares {
+    parakeet: f64,
+    whisper: f64,
+}
+
+impl Shares {
+    fn new(q: Quality, voices: bool) -> Self {
+        let (p, w) = if q.needs_whisper() {
+            (1.0, 3.0)
+        } else {
+            (1.0, 0.0)
+        };
+        let v = if voices { 0.5 } else { 0.0 };
+        let total = p + w + v;
+        Self {
+            parakeet: p / total,
+            whisper: w / total,
+        }
+    }
+}
 
 fn run(
     dir: &Path,
@@ -418,11 +457,9 @@ fn run(
         * SAMPLE_RATE as u64
         / 1000;
     let total_s = total_samples as f64 / SAMPLE_RATE as f64;
-    let share = if opts.quality.needs_whisper() {
-        PARAKEET_SHARE_BEST
-    } else {
-        1.0
-    };
+    let shares = Shares::new(opts.quality, opts.voices);
+    let share = shares.parakeet;
+    let after_whisper = shares.parakeet + shares.whisper;
     let mut progress = Progress {
         total_s,
         last: Instant::now(),
@@ -449,6 +486,7 @@ fn run(
         [me.into_words(), others.into_words()]
     };
     progress.report(total_s * share, true, report);
+    let others_segments = channels[1].segments.clone();
 
     // Pass 2 (Best): Whisper on the speech regions, merged with Parakeet.
     let words: Vec<(Speaker, Vec<Word>)> = if opts.quality.needs_whisper() {
@@ -459,11 +497,35 @@ fn run(
             &channels,
             total_samples,
             &mut ckpt,
-            &mut |done| progress.report(total_s * (share + (1.0 - share) * done), false, report),
+            &mut |done| progress.report(total_s * (share + shares.whisper * done), false, report),
             stop,
         )?
     } else {
         channels.into_iter().map(|c| (c.speaker, c.words)).collect()
+    };
+    progress.report(total_s * after_whisper, true, report);
+
+    // Pass 3: the voices of the system audio.
+    let mut words = words;
+    let others_voices = if opts.voices {
+        let others = &mut words[Speaker::Others.channel()].1;
+        voice_pass(
+            dir,
+            manifest,
+            opts,
+            &others_segments,
+            others,
+            &mut |done| {
+                progress.report(
+                    total_s * (after_whisper + (1.0 - after_whisper) * done),
+                    false,
+                    report,
+                )
+            },
+            stop,
+        )?
+    } else {
+        0
     };
     progress.report(total_s, true, report);
 
@@ -484,6 +546,7 @@ fn run(
         audio_s: total_s,
         processing_s: started.elapsed().as_secs_f64(),
         speakers: Speakers::default(),
+        others_voices,
         utterances,
     };
     let files = output::write_all(dir, &doc).context("cannot write the transcript")?;
@@ -495,6 +558,120 @@ fn run(
         processing_s: doc.processing_s,
     });
     Ok(files)
+}
+
+/// Voice prints of the system audio's speech windows (the session decoded
+/// again; only the current window is kept), clustered into voices; sets
+/// `voice` on `words`. Returns the number of voices told apart (0 for one).
+#[allow(clippy::too_many_arguments)]
+fn voice_pass(
+    dir: &Path,
+    manifest: &Manifest,
+    opts: &Options,
+    segments: &[(u64, usize)],
+    words: &mut [Word],
+    progress: &mut dyn FnMut(f64),
+    stop: &AtomicBool,
+) -> Result<u32> {
+    let wins = voices::windows(segments);
+    if wins.len() < 2 || words.is_empty() {
+        return Ok(0);
+    }
+    let embedder = Embedder::load(&ModelPaths::in_dir(&opts.model_dir).voice, opts.threads)?;
+    let (kept, prints) = voice_prints(&embedder, &wins, progress, &mut |on_block| {
+        stream_session(dir, manifest, stop, &mut |_, r, pos| on_block(r, pos))
+    })?;
+    Ok(voices::assign(words, &kept, &prints))
+}
+
+/// Receives `(samples, timeline position)` blocks of one channel.
+type ChannelFn<'a> = dyn FnMut(&[f32], u64) -> Result<()> + 'a;
+
+/// Windows `(start, length)` that got a print, and the prints.
+type Prints = (Vec<(u64, usize)>, Vec<Vec<f32>>);
+
+/// Prints of `wins` (sorted) from a stream of one channel's blocks; windows
+/// too short for the model are left out. Returns the windows kept and
+/// their prints.
+fn voice_prints(
+    embedder: &Embedder,
+    wins: &[(u64, usize)],
+    progress: &mut dyn FnMut(f64),
+    stream: &mut dyn FnMut(&mut ChannelFn<'_>) -> Result<u64>,
+) -> Result<Prints> {
+    let (mut kept, mut prints) = (Vec::new(), Vec::new());
+    let mut buf: Vec<f32> = Vec::new();
+    let mut base: u64 = 0;
+    let mut next = 0;
+    stream(&mut |r, pos| {
+        if buf.is_empty() {
+            base = pos;
+        }
+        buf.extend_from_slice(r);
+        while next < wins.len() {
+            let (s, len) = wins[next];
+            if s < base {
+                next += 1;
+                continue;
+            }
+            if s + len as u64 > base + buf.len() as u64 {
+                break;
+            }
+            let at = (s - base) as usize;
+            if let Some(p) = embedder.embed(&buf[at..at + len]) {
+                kept.push(wins[next]);
+                prints.push(p);
+            }
+            next += 1;
+            progress(next as f64 / wins.len() as f64);
+        }
+        // Keep only what the next window still needs.
+        let keep_from = wins.get(next).map_or(base + buf.len() as u64, |w| w.0);
+        let drop = (keep_from.saturating_sub(base) as usize).min(buf.len());
+        buf.drain(..drop);
+        base += drop as u64;
+        Ok(())
+    })?;
+    Ok((kept, prints))
+}
+
+/// Tells the voices apart in an existing transcript (checks and older
+/// transcripts): the system audio is decoded again, its speech found with
+/// the same VAD, and the files rewritten. Returns the number of voices.
+pub fn relabel_voices(dir: &Path, opts: &Options) -> Result<u32> {
+    let manifest = Manifest::load(dir)?;
+    let path = dir.join(output::JSON_FILE);
+    let mut doc: Document = serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("no transcript in {}", dir.display()))?,
+    )?;
+    let (_, right) = load_channels(dir)?;
+    let paths = ModelPaths::in_dir(&opts.model_dir);
+    let segments = crate::engine::speech_segments(&paths.vad, &right)?;
+    let mut me = Vec::new();
+    let mut others: Vec<Word> = Vec::new();
+    for u in doc.utterances.drain(..) {
+        match u.speaker {
+            Speaker::Me => me.push(Utterance { voice: None, ..u }),
+            Speaker::Others => others.extend(u.words),
+        }
+    }
+    let wins = voices::windows(&segments);
+    let embedder = Embedder::load(&paths.voice, opts.threads)?;
+    let (kept, prints) = voice_prints(&embedder, &wins, &mut |_| {}, &mut |on_block| {
+        for (i, block) in right.chunks(SAMPLE_RATE).enumerate() {
+            on_block(block, (i * SAMPLE_RATE) as u64)?;
+        }
+        Ok(right.len() as u64)
+    })?;
+    doc.others_voices = voices::assign(&mut others, &kept, &prints);
+    doc.settings.voices = Some(VoiceSettings::current());
+    doc.utterances = dialog::merge(
+        me,
+        transcript::group(Speaker::Others, others),
+        echo_possible(&manifest),
+    );
+    output::write_all(dir, &doc).context("cannot write the transcript")?;
+    Ok(doc.others_voices)
 }
 
 /// Merges per region; Parakeet words outside every region are kept as they are.

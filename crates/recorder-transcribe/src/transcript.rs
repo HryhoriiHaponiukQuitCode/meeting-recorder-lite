@@ -32,6 +32,10 @@ pub struct Word {
     /// for a stretch Whisper skipped, `parakeet-en` for English).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Which voice of the system audio (1, 2, …) when several were told
+    /// apart (see [`crate::voices`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<u32>,
 }
 
 impl Word {
@@ -41,6 +45,7 @@ impl Word {
             start,
             end,
             source: None,
+            voice: None,
         }
     }
 }
@@ -58,6 +63,24 @@ pub struct Utterance {
     /// The microphone picked up the other side (see [`crate::dialog`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub echo: bool,
+    /// Voice number on the system audio, when several were told apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<u32>,
+}
+
+impl Utterance {
+    /// "Me", "Others" or "Others 2".
+    pub fn label(&self) -> String {
+        label(self.speaker, self.voice)
+    }
+}
+
+/// "Me", "Others" or "Others 2".
+pub fn label(speaker: Speaker, voice: Option<u32>) -> String {
+    match voice {
+        Some(v) => format!("{} {v}", speaker.label()),
+        None => speaker.label().to_string(),
+    }
 }
 
 /// A pause this long between words starts a new utterance.
@@ -113,14 +136,14 @@ pub fn chunk_words(chunk: &Chunk, result: &ChunkResult) -> Vec<Word> {
     words
 }
 
-/// Words of one speaker as utterances: a new one after a sentence end or a
-/// pause of more than [`PAUSE_SPLIT_S`].
+/// Words of one speaker as utterances: a new one after a sentence end, a
+/// pause of more than [`PAUSE_SPLIT_S`] or a change of voice.
 pub fn group(speaker: Speaker, words: Vec<Word>) -> Vec<Utterance> {
     let mut out: Vec<Utterance> = Vec::new();
     let mut new_utterance = true;
     for w in words {
         match out.last_mut() {
-            Some(u) if !new_utterance && w.start - u.end <= PAUSE_SPLIT_S => {
+            Some(u) if !new_utterance && w.start - u.end <= PAUSE_SPLIT_S && w.voice == u.voice => {
                 u.text.push(' ');
                 u.text.push_str(&w.text);
                 u.end = u.end.max(w.end);
@@ -134,6 +157,7 @@ pub fn group(speaker: Speaker, words: Vec<Word>) -> Vec<Utterance> {
                     start: w.start,
                     end: w.end,
                     text: w.text.clone(),
+                    voice: w.voice,
                     words: vec![w],
                     echo: false,
                 });

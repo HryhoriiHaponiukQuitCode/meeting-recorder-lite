@@ -24,6 +24,8 @@ pub struct Settings {
     pub transcription_threads: u32,
     /// Best (Whisper + Parakeet, macOS) or Fast (Parakeet).
     pub transcription_quality: recorder_transcribe::model::Quality,
+    /// Tell the voices of the system audio apart (Others 1, 2, …).
+    pub tell_voices_apart: bool,
     /// `None` = the default models folder.
     pub models_dir: Option<PathBuf>,
 }
@@ -39,6 +41,7 @@ impl Default for Settings {
             transcribe_automatically: true,
             transcription_threads: recorder_transcribe::DEFAULT_THREADS,
             transcription_quality: recorder_transcribe::model::Quality::default_for_this_system(),
+            tell_voices_apart: true,
             models_dir: None,
         }
     }

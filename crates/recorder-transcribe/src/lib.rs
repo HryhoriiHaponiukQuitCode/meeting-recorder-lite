@@ -24,6 +24,7 @@ pub mod model;
 pub mod output;
 pub mod protocol;
 pub mod transcript;
+pub mod voices;
 
 /// Sample rate of the recordings and of the recognizer input.
 pub const SAMPLE_RATE: usize = 16_000;

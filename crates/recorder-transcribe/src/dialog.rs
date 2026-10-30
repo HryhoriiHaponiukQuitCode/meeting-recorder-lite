@@ -110,6 +110,7 @@ fn lcs(a: &[String], b: &[String]) -> usize {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
     pub speaker: Speaker,
+    pub voice: Option<u32>,
     pub start: f64,
     pub end: f64,
     pub text: String,
@@ -120,13 +121,18 @@ pub fn turns(dialog: &[Utterance]) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::new();
     for u in dialog.iter().filter(|u| !u.echo) {
         match out.last_mut() {
-            Some(t) if t.speaker == u.speaker && u.start - t.end <= TURN_GAP_S => {
+            Some(t)
+                if t.speaker == u.speaker
+                    && t.voice == u.voice
+                    && u.start - t.end <= TURN_GAP_S =>
+            {
                 t.text.push(' ');
                 t.text.push_str(&u.text);
                 t.end = t.end.max(u.end);
             }
             _ => out.push(Turn {
                 speaker: u.speaker,
+                voice: u.voice,
                 start: u.start,
                 end: u.end,
                 text: u.text.clone(),
@@ -148,6 +154,7 @@ mod tests {
             text: text.into(),
             words: vec![],
             echo: false,
+            voice: None,
         }
     }
 

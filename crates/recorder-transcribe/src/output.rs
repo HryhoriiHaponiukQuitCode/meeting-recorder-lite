@@ -44,6 +44,28 @@ pub struct Settings {
     pub vad: VadSettings,
     pub chunking: String,
     pub max_chunk_speech_s: u32,
+    /// How the voices of the system audio were told apart; absent when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voices: Option<VoiceSettings>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VoiceSettings {
+    pub model: String,
+    pub window_s: f64,
+    pub step_s: f64,
+    pub threshold: f32,
+}
+
+impl VoiceSettings {
+    pub fn current() -> Self {
+        Self {
+            model: crate::model::VOICE_FILE.name.into(),
+            window_s: crate::voices::WINDOW_S,
+            step_s: crate::voices::STEP_S,
+            threshold: crate::voices::THRESHOLD,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -59,7 +81,14 @@ pub struct Document {
     /// Seconds the transcription took (this run).
     pub processing_s: f64,
     pub speakers: Speakers,
+    /// Voices told apart on the system audio (0 = not separated or one).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub others_voices: u32,
     pub utterances: Vec<Utterance>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +132,16 @@ pub fn txt(doc: &Document) -> String {
         doc.model,
         doc.engine
     );
+    if doc.others_voices > 1 {
+        s.insert_str(
+            s.len() - 1,
+            &format!(
+                "Others 1–{} are different voices on the system audio, told apart automatically \
+                 (numbered in order of appearance; may be wrong for short replies).\n",
+                doc.others_voices
+            ),
+        );
+    }
     let t: Vec<Turn> = turns(&doc.utterances);
     if t.is_empty() {
         s.push_str("(no speech found)\n");
@@ -111,7 +150,7 @@ pub fn txt(doc: &Document) -> String {
         s.push_str(&format!(
             "[{}] {}: {}\n",
             clock(turn.start),
-            turn.speaker.label(),
+            crate::transcript::label(turn.speaker, turn.voice),
             turn.text
         ));
     }
@@ -128,7 +167,7 @@ pub fn srt(doc: &Document) -> String {
             i + 1,
             srt_time(u.start),
             srt_time(end),
-            u.speaker.label(),
+            u.label(),
             u.text
         ));
     }
@@ -171,6 +210,7 @@ mod tests {
             text: text.into(),
             words: vec![],
             echo,
+            voice: None,
         };
         Document {
             format_version: FORMAT_VERSION,
@@ -192,10 +232,12 @@ mod tests {
                 },
                 chunking: "speech only".into(),
                 max_chunk_speech_s: 30,
+                voices: None,
             },
             audio_s: 3725.0,
             processing_s: 1.0,
             speakers: Speakers::default(),
+            others_voices: 0,
             utterances: vec![
                 u(Speaker::Others, 1.0, 2.0, "Привіт.", false),
                 u(Speaker::Me, 1.2, 1.9, "привіт", true),

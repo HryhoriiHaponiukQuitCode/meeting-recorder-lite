@@ -36,6 +36,9 @@ struct Common {
     /// best (Whisper + Parakeet, macOS) or fast (Parakeet).
     #[arg(long, value_parser = parse_quality, default_value_t = Quality::default_for_this_system().as_str().to_string())]
     quality: String,
+    /// Do not tell the voices of the system audio apart (plain "Others").
+    #[arg(long)]
+    no_voices: bool,
 }
 
 fn parse_quality(s: &str) -> Result<String, String> {
@@ -66,6 +69,32 @@ enum Cmd {
         file: PathBuf,
         #[command(flatten)]
         common: Common,
+    },
+    /// Tell the voices apart in an existing transcript of a session and
+    /// rewrite its files (checks, older transcripts).
+    #[command(hide = true)]
+    Voices {
+        dir: PathBuf,
+        #[arg(long)]
+        model_dir: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_THREADS)]
+        threads: u32,
+    },
+    /// Voice prints of the speech windows of one channel (tuning): prints
+    /// `start end v1 … vN` lines.
+    #[command(hide = true)]
+    Embed {
+        dir: PathBuf,
+        /// left (Me), right (Others) or mix (both added).
+        #[arg(long, default_value = "right")]
+        channel: String,
+        #[arg(long)]
+        vad: PathBuf,
+        /// The voice model (comparisons of several).
+        #[arg(long)]
+        embedding: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_THREADS)]
+        threads: u32,
     },
     /// Check the model files against their SHA256 hashes.
     VerifyModel {
@@ -123,6 +152,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Session { dir, common, json } => {
             let opts = Options {
                 quality: common.quality(),
+                voices: !common.no_voices,
                 model_dir: common.model_dir,
                 threads: common.threads,
             };
@@ -171,6 +201,75 @@ fn run(cli: Cli) -> Result<()> {
             eprintln!(
                 "{:.1} s of audio in {:.2} s",
                 wave.num_samples() as f64 / 16_000.0,
+                t.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
+        Cmd::Voices {
+            dir,
+            model_dir,
+            threads,
+        } => {
+            let t = std::time::Instant::now();
+            let n = pipeline::relabel_voices(
+                &dir,
+                &Options {
+                    model_dir,
+                    threads,
+                    quality: Quality::Fast,
+                    voices: true,
+                },
+            )?;
+            eprintln!(
+                "{n} voices told apart in {:.1} s",
+                t.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
+        Cmd::Embed {
+            dir,
+            channel,
+            vad,
+            embedding,
+            threads,
+        } => {
+            use recorder_transcriber::voices::Embedder;
+            let (left, right) = pipeline::load_channels(&dir)?;
+            let samples: Vec<f32> = match channel.as_str() {
+                "left" => left,
+                "right" => right,
+                "mix" => left
+                    .iter()
+                    .zip(&right)
+                    .map(|(a, b)| (a + b).clamp(-1.0, 1.0))
+                    .collect(),
+                _ => anyhow::bail!("channel: left, right or mix"),
+            };
+            let t = std::time::Instant::now();
+            let segments = recorder_transcriber::engine::speech_segments(&vad, &samples)?;
+            let vad_s = t.elapsed().as_secs_f64();
+            let embedder = Embedder::load(&embedding, threads)?;
+            let sr = 16_000.0;
+            let ws = recorder_transcribe::voices::windows(&segments);
+            let t = std::time::Instant::now();
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            for &(start, len) in &ws {
+                let s = start as usize;
+                let Some(e) = embedder.embed(&samples[s..s + len]) else {
+                    continue;
+                };
+                write!(out, "{:.3} {:.3}", s as f32 / sr, (s + len) as f32 / sr)?;
+                for v in e {
+                    write!(out, " {v:.5}")?;
+                }
+                writeln!(out)?;
+            }
+            out.flush()?;
+            eprintln!(
+                "{} segments, {} windows, dim {}; VAD {vad_s:.1} s, voice prints {:.1} s",
+                segments.len(),
+                ws.len(),
+                embedder.dim(),
                 t.elapsed().as_secs_f64()
             );
             Ok(())

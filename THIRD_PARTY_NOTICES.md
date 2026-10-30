@@ -190,6 +190,14 @@ SOFTWARE.
   `ggml-large-v3-turbo-q8_0.bin`, the ggml conversion with 8-bit
   quantization from the whisper.cpp project
   (https://huggingface.co/ggerganov/whisper.cpp; no other changes).
+- **3D-Speaker CAM++ (zh/en, common, advanced)**
+  (https://modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced),
+  Apache-2.0, © Alibaba / the 3D-Speaker authors
+  (https://github.com/modelscope/3D-Speaker). Voice prints for telling
+  the voices of the system audio apart. Used as the ONNX export
+  `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` from the
+  sherpa-onnx releases (no other changes). Full Apache-2.0 text:
+  `licenses/Apache-2.0.txt`.
 - **Silero VAD** (https://github.com/snakers4/silero-vad), MIT,
   © 2020-present Silero Team, as `silero_vad.onnx` from the sherpa-onnx
   releases.

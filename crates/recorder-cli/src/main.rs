@@ -110,11 +110,14 @@ enum Cmd {
         /// Recognizer threads (default: the setting, 2).
         #[arg(long)]
         threads: Option<u32>,
+        /// Plain "Others" instead of Others 1, 2, … (default: the setting).
+        #[arg(long)]
+        no_voices: bool,
         /// Folder with the speech model (default: the setting).
         #[arg(long)]
         model_dir: Option<PathBuf>,
     },
-    /// Download, check or delete the speech model (640 MiB).
+    /// Download, check or delete the speech models.
     Model {
         #[command(subcommand)]
         action: ModelAction,
@@ -204,6 +207,7 @@ fn main() -> Result<()> {
             session,
             quality,
             threads,
+            no_voices,
             model_dir,
         } => {
             let dir = model_dir.unwrap_or_else(|| settings.models_dir());
@@ -216,17 +220,19 @@ fn main() -> Result<()> {
             }
             let threads = threads.unwrap_or_else(|| settings.transcription_threads());
             // The transcriber prints its own progress to stderr.
-            let status = std::process::Command::new(transcription::helper_path()?)
-                .arg("session")
+            let mut cmd = std::process::Command::new(transcription::helper_path()?);
+            cmd.arg("session")
                 .arg(&session)
                 .arg("--model-dir")
                 .arg(&dir)
                 .arg("--threads")
                 .arg(threads.to_string())
                 .arg("--quality")
-                .arg(quality.as_str())
-                .status()
-                .context("cannot start the transcriber")?;
+                .arg(quality.as_str());
+            if no_voices || !settings.tell_voices_apart {
+                cmd.arg("--no-voices");
+            }
+            let status = cmd.status().context("cannot start the transcriber")?;
             if !status.success() {
                 anyhow::bail!("transcription failed");
             }
