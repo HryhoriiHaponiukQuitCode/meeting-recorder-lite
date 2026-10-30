@@ -11,6 +11,10 @@
 //!
 //! The golden texts are what this build produced; any change in the engine,
 //! model, VAD or chunking shows up as a difference.
+//!
+//! The Best-quality tests (macOS) need the Whisper model in `MR_MODEL_DIR`
+//! too; `MR_TEST_REF_DIR` (optional) points at the reference excerpts
+//! (`reference-check`) with two passages Whisper alone skipped.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,7 +25,7 @@ use recorder_core::session::{SessionConfig, SessionWriter};
 use recorder_transcribe::Speaker;
 use recorder_transcribe::checkpoint::PARTIAL_FILE;
 use recorder_transcribe::dialog::normalized_words;
-use recorder_transcribe::model::ModelPaths;
+use recorder_transcribe::model::{ModelPaths, Quality};
 use recorder_transcribe::output::{Document, JSON_FILE, TXT_FILE};
 use recorder_transcribe::protocol::Message;
 use recorder_transcriber::engine::Engine;
@@ -197,9 +201,19 @@ fn transcribe(
     stop: &AtomicBool,
     on: &mut dyn FnMut(&Message),
 ) -> anyhow::Result<Vec<String>> {
+    transcribe_with(dir, Quality::Fast, stop, on)
+}
+
+fn transcribe_with(
+    dir: &Path,
+    quality: Quality,
+    stop: &AtomicBool,
+    on: &mut dyn FnMut(&Message),
+) -> anyhow::Result<Vec<String>> {
     let opts = Options {
         model_dir: model_dir(),
         threads: THREADS,
+        quality,
     };
     pipeline::transcribe_session(dir, &opts, &mut |m| on(&m), stop)
 }
@@ -352,5 +366,141 @@ fn echo_of_the_other_side_is_hidden() {
     assert_eq!(hidden, me.len(), "{me:#?}");
     let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
     assert!(!txt.contains("] Me: "), "{txt}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Best quality: the same two-person call. Whisper's text, nothing lost
+/// against Parakeet, English (mine) kept, times ordered.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the models"]
+fn best_quality_is_complete_and_keeps_both_speakers() {
+    let en = wav("MR_TEST_EN_WAV");
+    let ua_full = wav("MR_TEST_UA_WAV");
+    let offset = en.len().div_ceil(512) * 512 + 512 * 20;
+    let mut right = vec![0.0; offset];
+    right.extend_from_slice(&ua_full[..16_000 * 100]);
+    let root = temp_root("best");
+    let fast = make_session(&root, 0, &en, &right);
+    let best = make_session(&root, 0, &en, &right);
+    transcribe_with(&fast, Quality::Fast, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let mut progress = Vec::new();
+    transcribe_with(&best, Quality::Best, &AtomicBool::new(false), &mut |m| {
+        if let Message::Progress { done_s, .. } = m {
+            progress.push(*done_s)
+        }
+    })
+    .unwrap();
+    assert!(
+        progress.windows(2).all(|w| w[0] <= w[1] + 1e-9),
+        "progress goes forward"
+    );
+    let (f, b) = (document(&fast), document(&best));
+    assert_eq!(b.settings.quality, Quality::Best);
+    assert!(b.model.contains("whisper") && b.engine.contains("whisper.cpp"));
+    let sources: Vec<&str> = b
+        .utterances
+        .iter()
+        .flat_map(|u| u.words.iter().filter_map(|w| w.source.as_deref()))
+        .collect();
+    assert!(
+        sources.contains(&"whisper"),
+        "Whisper wrote the Ukrainian side"
+    );
+    assert!(
+        sources.contains(&"parakeet-en"),
+        "English came from Parakeet"
+    );
+    // Nothing Parakeet heard is missing (spans of 6+ words).
+    for sp in [Speaker::Me, Speaker::Others] {
+        let fw = normalized_words(&texts(&f, sp));
+        let bw = normalized_words(&texts(&b, sp));
+        let missing = missing_spans(&fw, &bw);
+        println!(
+            "{sp:?}: fast {} words, best {} words, missing spans {missing:?}",
+            fw.len(),
+            bw.len()
+        );
+        assert!(missing.is_empty(), "{sp:?} lost {missing:?}");
+    }
+    let switch = offset as f64 / 16_000.0;
+    for u in &b.utterances {
+        match u.speaker {
+            Speaker::Me => assert!(u.end <= switch + 1.0, "{u:?}"),
+            Speaker::Others => assert!(u.start >= switch - 1.0, "{u:?}"),
+        }
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// Runs of 6+ words of `a` that `b` lacks.
+#[cfg(target_os = "macos")]
+fn missing_spans(a: &[String], b: &[String]) -> Vec<String> {
+    // Longest common subsequence back-trace, collecting unmatched runs.
+    let (n, m) = (a.len(), b.len());
+    let mut d = vec![vec![0u16; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            d[i][j] = if a[i] == b[j] {
+                d[i + 1][j + 1] + 1
+            } else {
+                d[i + 1][j].max(d[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j, mut run, mut out) = (0, 0, Vec::new(), Vec::new());
+    while i < n {
+        if j < m && a[i] == b[j] {
+            if run.len() >= 6 {
+                out.push(run.join(" "));
+            }
+            run.clear();
+            i += 1;
+            j += 1;
+        } else if j < m && d[i][j + 1] >= d[i + 1][j] {
+            j += 1;
+        } else {
+            run.push(a[i].clone());
+            i += 1;
+        }
+    }
+    if run.len() >= 6 {
+        out.push(run.join(" "));
+    }
+    out
+}
+
+/// The two passages from the user's calls that Whisper alone skipped come
+/// back from Parakeet in the Best quality.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs the models and the reference excerpts"]
+fn best_quality_restores_what_whisper_skipped() {
+    let Some(refdir) = std::env::var_os("MR_TEST_REF_DIR").map(PathBuf::from) else {
+        println!("MR_TEST_REF_DIR not set, skipped");
+        return;
+    };
+    let read = |name: &str| {
+        let w = sherpa_onnx::Wave::read(&refdir.join(name).to_string_lossy()).unwrap();
+        w.samples().to_vec()
+    };
+    let root = temp_root("restore");
+    // Key words of the skipped passages (Parakeet's wording from the Opus
+    // recording differs from the WAV, so not whole phrases).
+    for (file, must) in [
+        ("01-meeting-others-a.wav", ["смішно", "за вік", "окей"]),
+        (
+            "08-project-others.wav",
+            ["писала", "поза домен", "їм написала"],
+        ),
+    ] {
+        let dir = make_session(&root, 0, &[], &read(file));
+        transcribe_with(&dir, Quality::Best, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let t = texts(&document(&dir), Speaker::Others).to_lowercase();
+        println!("{file}: {t}");
+        for m in must {
+            assert!(t.contains(m), "{file}: «{m}» missing in {t}");
+        }
+    }
     std::fs::remove_dir_all(root).ok();
 }

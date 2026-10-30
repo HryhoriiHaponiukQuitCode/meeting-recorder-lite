@@ -22,6 +22,8 @@ pub struct Settings {
     pub transcribe_automatically: bool,
     /// Recognizer threads: 2 = gentle (default), 4 = fast.
     pub transcription_threads: u32,
+    /// Best (Whisper + Parakeet, macOS) or Fast (Parakeet).
+    pub transcription_quality: recorder_transcribe::model::Quality,
     /// `None` = the default models folder.
     pub models_dir: Option<PathBuf>,
 }
@@ -36,6 +38,7 @@ impl Default for Settings {
             mic_device: None,
             transcribe_automatically: true,
             transcription_threads: recorder_transcribe::DEFAULT_THREADS,
+            transcription_quality: recorder_transcribe::model::Quality::default_for_this_system(),
             models_dir: None,
         }
     }
@@ -74,6 +77,15 @@ impl Settings {
         self.models_dir
             .clone()
             .unwrap_or_else(crate::paths::default_models_dir)
+    }
+
+    /// The chosen quality if this system can run it, else the default.
+    pub fn transcription_quality(&self) -> recorder_transcribe::model::Quality {
+        if self.transcription_quality.is_available() {
+            self.transcription_quality
+        } else {
+            recorder_transcribe::model::Quality::default_for_this_system()
+        }
     }
 
     /// Threads within 1..=available cores.

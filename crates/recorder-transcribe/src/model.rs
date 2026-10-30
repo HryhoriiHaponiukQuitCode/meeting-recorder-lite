@@ -1,5 +1,12 @@
-//! The speech model: NVIDIA Parakeet TDT 0.6B v3 (INT8, sherpa-onnx export,
-//! CC-BY-4.0) and the silero voice activity detector (MIT), 640 MiB in all.
+//! The speech models and which of them each [`Quality`] needs:
+//!
+//! - **Fast** (every system): NVIDIA Parakeet TDT 0.6B v3 (INT8, sherpa-onnx
+//!   export, CC-BY-4.0) and the silero voice activity detector (MIT),
+//!   640 MiB.
+//! - **Best** (macOS): the same plus OpenAI Whisper large-v3-turbo (Q8,
+//!   ggml for whisper.cpp, MIT), 834 MiB, run on the GPU through Metal. The
+//!   transcript takes Whisper's words and fills what Whisper skipped from
+//!   Parakeet (see [`crate::hybrid`]).
 //!
 //! The files are not in the installer; they are downloaded on first use into
 //! the models folder, laid out as
@@ -9,6 +16,7 @@
 //!   silero_vad.onnx
 //!   sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/
 //!     encoder.int8.onnx  decoder.int8.onnx  joiner.int8.onnx  tokens.txt
+//!   ggml-large-v3-turbo-q8_0.bin           (Best only)
 //! ```
 //!
 //! Download uses the system `curl` and `tar` (present on macOS and on
@@ -22,13 +30,68 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const ENGINE: &str = "sherpa-onnx 1.13.8";
+pub const WHISPER_ENGINE: &str = "whisper.cpp 1.8.3";
 pub const ASR_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
 pub const MODEL_NAME: &str = ASR_DIR;
+pub const WHISPER_MODEL_NAME: &str = "whisper-large-v3-turbo-q8_0";
 pub const ATTRIBUTION: &str = "Speech recognition: NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0), \
-silero VAD (MIT), sherpa-onnx (Apache-2.0), ONNX Runtime (MIT).";
+OpenAI Whisper large-v3-turbo (MIT, macOS), silero VAD (MIT), sherpa-onnx (Apache-2.0), \
+whisper.cpp (MIT), ONNX Runtime (MIT).";
+
+/// How the transcript is made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    /// Whisper large-v3-turbo on the GPU plus Parakeet for what Whisper
+    /// skips (macOS only): the most accurate, about 5x slower.
+    Best,
+    /// Parakeet alone: fast on any CPU.
+    #[default]
+    Fast,
+}
+
+impl Quality {
+    /// The qualities this build can run.
+    pub fn available() -> &'static [Quality] {
+        if cfg!(target_os = "macos") {
+            &[Quality::Best, Quality::Fast]
+        } else {
+            &[Quality::Fast]
+        }
+    }
+
+    /// Best where available.
+    pub fn default_for_this_system() -> Quality {
+        Quality::available()[0]
+    }
+
+    pub fn is_available(self) -> bool {
+        Quality::available().contains(&self)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Quality::Best => "best",
+            Quality::Fast => "fast",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Quality> {
+        match s {
+            "best" => Some(Quality::Best),
+            "fast" => Some(Quality::Fast),
+            _ => None,
+        }
+    }
+
+    pub fn needs_whisper(self) -> bool {
+        self == Quality::Best
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ModelFile {
@@ -73,8 +136,24 @@ pub const ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/do
 const ARCHIVE_SIZE: u64 = 487_170_055;
 const ARCHIVE_SHA256: &str = "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf";
 
-/// Bytes downloaded when nothing is there yet.
-pub const DOWNLOAD_SIZE: u64 = ARCHIVE_SIZE + VAD_FILE.size;
+pub const WHISPER_FILE: ModelFile = ModelFile {
+    name: "ggml-large-v3-turbo-q8_0.bin",
+    size: 874_188_075,
+    sha256: "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1",
+};
+pub const WHISPER_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin";
+
+/// Bytes downloaded for `quality` when nothing is there yet.
+pub fn download_size(quality: Quality) -> u64 {
+    ARCHIVE_SIZE
+        + VAD_FILE.size
+        + if quality.needs_whisper() {
+            WHISPER_FILE.size
+        } else {
+            0
+        }
+}
 
 /// Partial downloads and unpacking happen here.
 const WORK_DIR: &str = ".download";
@@ -87,6 +166,8 @@ pub struct ModelPaths {
     pub joiner: PathBuf,
     pub tokens: PathBuf,
     pub vad: PathBuf,
+    /// Used by [`Quality::Best`] only.
+    pub whisper: PathBuf,
 }
 
 impl ModelPaths {
@@ -98,6 +179,7 @@ impl ModelPaths {
             joiner: asr.join(ASR_FILES[2].name),
             tokens: asr.join(ASR_FILES[3].name),
             vad: dir.join(VAD_FILE.name),
+            whisper: dir.join(WHISPER_FILE.name),
         }
     }
 }
@@ -112,28 +194,49 @@ pub enum ModelStatus {
     Ready,
 }
 
-fn all_files(dir: &Path) -> impl Iterator<Item = (PathBuf, ModelFile)> {
+fn all_files(dir: &Path, quality: Quality) -> impl Iterator<Item = (PathBuf, ModelFile)> {
     let asr = dir.join(ASR_DIR);
+    let whisper = quality
+        .needs_whisper()
+        .then(|| (dir.join(WHISPER_FILE.name), WHISPER_FILE));
     ASR_FILES
         .into_iter()
         .map(move |f| (asr.join(f.name), f))
         .chain(std::iter::once((dir.join(VAD_FILE.name), VAD_FILE)))
+        .chain(whisper)
 }
 
 fn size_ok(path: &Path, f: &ModelFile) -> bool {
     fs::metadata(path).is_ok_and(|m| m.len() == f.size)
 }
 
-/// Quick check by file sizes (hashes are checked after download and by
-/// [`verify`]).
-pub fn status(dir: &Path) -> ModelStatus {
-    if all_files(dir).all(|(p, f)| size_ok(&p, &f)) {
+/// Quick check by file sizes of what `quality` needs (hashes are checked
+/// after download and by [`verify`]).
+pub fn status(dir: &Path, quality: Quality) -> ModelStatus {
+    if all_files(dir, quality).all(|(p, f)| size_ok(&p, &f)) {
         ModelStatus::Ready
-    } else if all_files(dir).all(|(p, _)| !p.exists()) && !dir.join(WORK_DIR).exists() {
+    } else if all_files(dir, quality).all(|(p, _)| !p.exists()) && !dir.join(WORK_DIR).exists() {
         ModelStatus::Missing
     } else {
         ModelStatus::Incomplete
     }
+}
+
+/// Bytes still to download for `quality` (whole files; a partial download
+/// resumes, so it can be less).
+pub fn missing_bytes(dir: &Path, quality: Quality) -> u64 {
+    let asr = dir.join(ASR_DIR);
+    let mut n = 0;
+    if !size_ok(&dir.join(VAD_FILE.name), &VAD_FILE) {
+        n += VAD_FILE.size;
+    }
+    if !ASR_FILES.iter().all(|f| size_ok(&asr.join(f.name), f)) {
+        n += ARCHIVE_SIZE;
+    }
+    if quality.needs_whisper() && !size_ok(&dir.join(WHISPER_FILE.name), &WHISPER_FILE) {
+        n += WHISPER_FILE.size;
+    }
+    n
 }
 
 /// Bytes the model takes on disk, partial downloads included.
@@ -147,7 +250,10 @@ pub fn disk_size(dir: &Path) -> u64 {
             Err(_) => 0,
         }
     }
-    walk(&dir.join(ASR_DIR)) + walk(&dir.join(VAD_FILE.name)) + walk(&dir.join(WORK_DIR))
+    walk(&dir.join(ASR_DIR))
+        + walk(&dir.join(VAD_FILE.name))
+        + walk(&dir.join(WHISPER_FILE.name))
+        + walk(&dir.join(WORK_DIR))
 }
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
@@ -176,9 +282,10 @@ fn check_hash(path: &Path, expected: &str) -> io::Result<()> {
     }
 }
 
-/// Checks every file against its SHA256 (about a second per 600 MB).
-pub fn verify(dir: &Path) -> io::Result<()> {
-    for (path, f) in all_files(dir) {
+/// Checks every file `quality` needs against its SHA256 (about a second
+/// per 600 MB).
+pub fn verify(dir: &Path, quality: Quality) -> io::Result<()> {
+    for (path, f) in all_files(dir, quality) {
         if !size_ok(&path, &f) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -198,9 +305,11 @@ pub fn delete(dir: &Path) -> io::Result<()> {
             fs::remove_dir_all(&p)?;
         }
     }
-    let vad = dir.join(VAD_FILE.name);
-    if vad.exists() {
-        fs::remove_file(vad)?;
+    for f in [VAD_FILE, WHISPER_FILE] {
+        let p = dir.join(f.name);
+        if p.exists() {
+            fs::remove_file(p)?;
+        }
     }
     Ok(())
 }
@@ -215,7 +324,7 @@ pub enum Phase {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DownloadProgress {
     pub phase: Phase,
-    /// Bytes downloaded of [`DOWNLOAD_SIZE`].
+    /// Bytes downloaded of [`download_size`].
     pub done: u64,
     pub total: u64,
 }
@@ -255,7 +364,7 @@ fn fetch(
     url: &str,
     dest: &Path,
     size: u64,
-    before: u64,
+    (before, total): (u64, u64),
     progress: &mut dyn FnMut(DownloadProgress),
     cancel: &AtomicBool,
 ) -> io::Result<()> {
@@ -304,7 +413,7 @@ fn fetch(
             progress(DownloadProgress {
                 phase: Phase::Downloading,
                 done: before + got.min(size),
-                total: DOWNLOAD_SIZE,
+                total,
             });
             std::thread::sleep(Duration::from_millis(250));
         };
@@ -322,26 +431,29 @@ fn fetch(
     progress(DownloadProgress {
         phase: Phase::Verifying,
         done: before + size,
-        total: DOWNLOAD_SIZE,
+        total,
     });
     Ok(())
 }
 
-/// Downloads whatever is missing, checks the hashes and moves the files
-/// into place. Safe to call again after an interruption: partial downloads
-/// resume. `cancel` stops it (the error kind is `Interrupted`).
+/// Downloads whatever `quality` needs and is missing, checks the hashes
+/// and moves the files into place. Safe to call again after an
+/// interruption: partial downloads resume. `cancel` stops it (the error kind
+/// is `Interrupted`).
 pub fn download(
     dir: &Path,
+    quality: Quality,
     progress: &mut dyn FnMut(DownloadProgress),
     cancel: &AtomicBool,
 ) -> io::Result<()> {
     let work = dir.join(WORK_DIR);
     fs::create_dir_all(&work)?;
+    let total = download_size(quality);
 
     let vad = dir.join(VAD_FILE.name);
     if !size_ok(&vad, &VAD_FILE) || check_hash(&vad, VAD_FILE.sha256).is_err() {
         let part = work.join(VAD_FILE.name);
-        fetch(VAD_URL, &part, VAD_FILE.size, 0, progress, cancel)?;
+        fetch(VAD_URL, &part, VAD_FILE.size, (0, total), progress, cancel)?;
         if let Err(e) = check_hash(&part, VAD_FILE.sha256) {
             let _ = fs::remove_file(&part);
             return Err(e);
@@ -359,7 +471,7 @@ pub fn download(
             ARCHIVE_URL,
             &archive,
             ARCHIVE_SIZE,
-            VAD_FILE.size,
+            (VAD_FILE.size, total),
             progress,
             cancel,
         )?;
@@ -375,8 +487,8 @@ pub fn download(
         }
         progress(DownloadProgress {
             phase: Phase::Unpacking,
-            done: DOWNLOAD_SIZE,
-            total: DOWNLOAD_SIZE,
+            done: VAD_FILE.size + ARCHIVE_SIZE,
+            total,
         });
         let unpack = work.join("unpack");
         if unpack.exists() {
@@ -415,6 +527,29 @@ pub fn download(
         let _ = fs::remove_dir_all(&unpack);
         let _ = fs::remove_file(&archive);
     }
+
+    let whisper = dir.join(WHISPER_FILE.name);
+    if quality.needs_whisper()
+        && (!size_ok(&whisper, &WHISPER_FILE) || check_hash(&whisper, WHISPER_FILE.sha256).is_err())
+    {
+        let part = work.join(WHISPER_FILE.name);
+        fetch(
+            WHISPER_URL,
+            &part,
+            WHISPER_FILE.size,
+            (VAD_FILE.size + ARCHIVE_SIZE, total),
+            progress,
+            cancel,
+        )?;
+        if let Err(e) = check_hash(&part, WHISPER_FILE.sha256) {
+            let _ = fs::remove_file(&part);
+            return Err(io::Error::new(
+                e.kind(),
+                "the downloaded Whisper model is damaged; it was deleted, please try again",
+            ));
+        }
+        fs::rename(&part, &whisper)?;
+    }
     let _ = fs::remove_dir_all(&work);
     Ok(())
 }
@@ -428,20 +563,49 @@ mod tests {
         let d = std::env::temp_dir().join(format!("mr-model-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
-        assert_eq!(status(&d), ModelStatus::Missing);
+        for q in [Quality::Fast, Quality::Best] {
+            assert_eq!(status(&d, q), ModelStatus::Missing);
+        }
         fs::write(d.join(VAD_FILE.name), b"short").unwrap();
-        assert_eq!(status(&d), ModelStatus::Incomplete);
-        assert!(verify(&d).is_err());
-        assert!(disk_size(&d) >= 5);
+        fs::write(d.join(WHISPER_FILE.name), b"partial").unwrap();
+        assert_eq!(status(&d, Quality::Fast), ModelStatus::Incomplete);
+        assert!(verify(&d, Quality::Fast).is_err());
+        assert!(disk_size(&d) >= 12, "the Whisper file counts too");
         delete(&d).unwrap();
-        assert_eq!(status(&d), ModelStatus::Missing);
+        assert_eq!(status(&d, Quality::Best), ModelStatus::Missing);
         assert_eq!(disk_size(&d), 0);
+        assert_eq!(
+            missing_bytes(&d, Quality::Best),
+            download_size(Quality::Best)
+        );
+        assert_eq!(
+            missing_bytes(&d, Quality::Fast),
+            download_size(Quality::Fast)
+        );
         let p = ModelPaths::in_dir(&d);
         assert!(
             p.encoder
                 .ends_with("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx")
         );
         fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn qualities_and_sizes_per_system() {
+        assert!(Quality::default_for_this_system().is_available());
+        if cfg!(target_os = "macos") {
+            assert_eq!(Quality::default_for_this_system(), Quality::Best);
+        } else {
+            assert_eq!(Quality::available(), &[Quality::Fast]);
+        }
+        assert_eq!(
+            download_size(Quality::Best) - download_size(Quality::Fast),
+            WHISPER_FILE.size
+        );
+        for q in [Quality::Best, Quality::Fast] {
+            assert_eq!(Quality::parse(q.as_str()), Some(q));
+        }
+        assert_eq!(Quality::parse("x"), None);
     }
 
     #[test]
@@ -469,7 +633,7 @@ mod tests {
             VAD_URL,
             &work.join(VAD_FILE.name),
             VAD_FILE.size,
-            0,
+            (0, VAD_FILE.size),
             &mut |_| seen += 1,
             &AtomicBool::new(false),
         )

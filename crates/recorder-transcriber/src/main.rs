@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use recorder_transcribe::model::{self, ModelPaths};
+use recorder_transcribe::model::{self, ModelPaths, Quality};
 use recorder_transcribe::protocol::Message;
 use recorder_transcribe::{DEFAULT_THREADS, Speaker};
 use recorder_transcriber::engine::Engine;
@@ -33,6 +33,21 @@ struct Common {
     /// Recognizer threads.
     #[arg(long, default_value_t = DEFAULT_THREADS)]
     threads: u32,
+    /// best (Whisper + Parakeet, macOS) or fast (Parakeet).
+    #[arg(long, value_parser = parse_quality, default_value_t = Quality::default_for_this_system().as_str().to_string())]
+    quality: String,
+}
+
+fn parse_quality(s: &str) -> Result<String, String> {
+    Quality::parse(s)
+        .map(|q| q.as_str().to_string())
+        .ok_or_else(|| "expected best or fast".to_string())
+}
+
+impl Common {
+    fn quality(&self) -> Quality {
+        Quality::parse(&self.quality).unwrap_or_default()
+    }
 }
 
 #[derive(Subcommand)]
@@ -56,6 +71,9 @@ enum Cmd {
     VerifyModel {
         #[arg(long)]
         model_dir: PathBuf,
+        /// best or fast: which files to check.
+        #[arg(long, value_parser = parse_quality, default_value_t = Quality::default_for_this_system().as_str().to_string())]
+        quality: String,
     },
 }
 
@@ -104,6 +122,7 @@ fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Session { dir, common, json } => {
             let opts = Options {
+                quality: common.quality(),
                 model_dir: common.model_dir,
                 threads: common.threads,
             };
@@ -127,20 +146,37 @@ fn run(cli: Cli) -> Result<()> {
             let wave = sherpa_onnx::Wave::read(&file.to_string_lossy())
                 .with_context(|| format!("cannot read {}", file.display()))?;
             anyhow::ensure!(wave.sample_rate() == 16_000, "the WAV must be 16 kHz mono");
-            let engine = Engine::load(&ModelPaths::in_dir(&common.model_dir), common.threads)?;
+            let paths = ModelPaths::in_dir(&common.model_dir);
+            let engine = Engine::load(&paths, common.threads)?;
             let t = std::time::Instant::now();
-            let ch = pipeline::transcribe_mono(&engine, Speaker::Me, wave.samples())?;
-            println!("{}", ch.text());
+            match common.quality() {
+                Quality::Fast => {
+                    let ch = pipeline::transcribe_mono(&engine, Speaker::Me, wave.samples())?;
+                    println!("{}", ch.text());
+                }
+                #[cfg(target_os = "macos")]
+                Quality::Best => {
+                    let whisper = recorder_transcriber::whisper::WhisperEngine::load(
+                        &paths.whisper,
+                        common.threads,
+                    )?;
+                    let words =
+                        pipeline::hybrid_mono(&engine, &whisper, Speaker::Me, wave.samples())?;
+                    let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+                    println!("{}", text.join(" "));
+                }
+                #[cfg(not(target_os = "macos"))]
+                Quality::Best => anyhow::bail!("the Best quality needs macOS"),
+            }
             eprintln!(
-                "{:.1} s of audio in {:.2} s, {} chunks",
+                "{:.1} s of audio in {:.2} s",
                 wave.num_samples() as f64 / 16_000.0,
-                t.elapsed().as_secs_f64(),
-                ch.chunks()
+                t.elapsed().as_secs_f64()
             );
             Ok(())
         }
-        Cmd::VerifyModel { model_dir } => {
-            model::verify(&model_dir)?;
+        Cmd::VerifyModel { model_dir, quality } => {
+            model::verify(&model_dir, Quality::parse(&quality).unwrap_or_default())?;
             println!("OK: all model files match their SHA256.");
             Ok(())
         }

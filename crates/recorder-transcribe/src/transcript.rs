@@ -28,6 +28,21 @@ pub struct Word {
     /// Seconds on the recording timeline.
     pub start: f64,
     pub end: f64,
+    /// In the Best quality: which model wrote it (`whisper`, `parakeet`
+    /// for a stretch Whisper skipped, `parakeet-en` for English).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl Word {
+    pub fn new(text: impl Into<String>, start: f64, end: f64) -> Self {
+        Self {
+            text: text.into(),
+            start,
+            end,
+            source: None,
+        }
+    }
 }
 
 /// One sentence (or a phrase ended by a pause) of one speaker.
@@ -56,6 +71,11 @@ fn ends_sentence(word: &str) -> bool {
 
 /// Splits a chunk's tokens into words and utterances on the timeline.
 pub fn utterances(speaker: Speaker, chunk: &Chunk, result: &ChunkResult) -> Vec<Utterance> {
+    group(speaker, chunk_words(chunk, result))
+}
+
+/// A chunk's tokens as words on the recording timeline.
+pub fn chunk_words(chunk: &Chunk, result: &ChunkResult) -> Vec<Word> {
     // Tokens -> words. Punctuation tokens have no leading space and attach
     // to the previous word. Before digits (and some words) the model emits
     // a token that is only a space: the next token starts a new word.
@@ -87,14 +107,15 @@ pub fn utterances(speaker: Speaker, chunk: &Chunk, result: &ChunkResult) -> Vec<
                 w.text.push_str(token);
                 w.end = w.end.max(end);
             }
-            _ => words.push(Word {
-                text: token.trim_start().to_string(),
-                start,
-                end,
-            }),
+            _ => words.push(Word::new(token.trim_start(), start, end)),
         }
     }
+    words
+}
 
+/// Words of one speaker as utterances: a new one after a sentence end or a
+/// pause of more than [`PAUSE_SPLIT_S`].
+pub fn group(speaker: Speaker, words: Vec<Word>) -> Vec<Utterance> {
     let mut out: Vec<Utterance> = Vec::new();
     let mut new_utterance = true;
     for w in words {

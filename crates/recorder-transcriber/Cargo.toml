@@ -25,5 +25,10 @@ sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["stat
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Best quality on macOS: whisper.cpp 1.8.3 (static, Metal with the shaders
+# embedded) for Whisper large-v3-turbo.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "=0.16.0", features = ["metal"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_System_Threading"] }

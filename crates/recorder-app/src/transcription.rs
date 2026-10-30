@@ -14,7 +14,7 @@ use recorder_transcribe::model::{self, DownloadProgress, ModelStatus};
 use recorder_transcribe::output::TXT_FILE;
 use recorder_transcribe::protocol::Message;
 
-pub use recorder_transcribe::model::{ATTRIBUTION, DOWNLOAD_SIZE, Phase};
+pub use recorder_transcribe::model::{ATTRIBUTION, Phase, Quality, download_size, missing_bytes};
 
 /// The transcriber program next to the running executable (inside the app
 /// bundle on macOS, in the install folder on Windows, in target/ in dev).
@@ -35,8 +35,8 @@ pub fn helper_path() -> io::Result<PathBuf> {
     }
 }
 
-pub fn model_status(models_dir: &Path) -> ModelStatus {
-    model::status(models_dir)
+pub fn model_status(models_dir: &Path, quality: Quality) -> ModelStatus {
+    model::status(models_dir, quality)
 }
 
 pub fn model_disk_size(models_dir: &Path) -> u64 {
@@ -95,7 +95,7 @@ pub struct ModelDownload {
 }
 
 impl ModelDownload {
-    pub fn start(models_dir: PathBuf) -> Self {
+    pub fn start(models_dir: PathBuf, quality: Quality) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(DownloadState::default()));
         let thread = {
@@ -103,9 +103,10 @@ impl ModelDownload {
             std::thread::Builder::new()
                 .name("model-download".into())
                 .spawn(move || {
-                    tracing::info!(dir = %models_dir.display(), "model download started");
+                    tracing::info!(dir = %models_dir.display(), quality = quality.as_str(), "model download started");
                     let result = model::download(
                         &models_dir,
+                        quality,
                         &mut |p| state.lock().expect("state").progress = Some(p),
                         &cancel,
                     );
@@ -176,7 +177,12 @@ pub struct TranscriptionJob {
 }
 
 impl TranscriptionJob {
-    pub fn start(session: &Path, models_dir: &Path, threads: u32) -> io::Result<Self> {
+    pub fn start(
+        session: &Path,
+        models_dir: &Path,
+        threads: u32,
+        quality: Quality,
+    ) -> io::Result<Self> {
         let mut cmd = Command::new(helper_path()?);
         cmd.arg("session")
             .arg(session)
@@ -184,6 +190,8 @@ impl TranscriptionJob {
             .arg(models_dir)
             .arg("--threads")
             .arg(threads.to_string())
+            .arg("--quality")
+            .arg(quality.as_str())
             .arg("--json")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -195,7 +203,7 @@ impl TranscriptionJob {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn()?;
-        tracing::info!(session = %session.display(), threads, "transcription started");
+        tracing::info!(session = %session.display(), threads, quality = quality.as_str(), "transcription started");
         let state = Arc::new(Mutex::new(JobState::default()));
         if let Some(out) = child.stdout.take() {
             let state = state.clone();

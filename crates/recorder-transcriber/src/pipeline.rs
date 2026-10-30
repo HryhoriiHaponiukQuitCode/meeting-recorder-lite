@@ -1,9 +1,15 @@
 //! Session → transcript.
 //!
+//! Pass 1, every quality: Parakeet on chunks of at most 30 s of speech.
+//! Pass 2, Best quality (macOS): the Parakeet engine is dropped, the parts
+//! are decoded again and Whisper runs on the speech regions found in pass 1;
+//! the two are merged per region ([`recorder_transcribe::hybrid`]).
+//!
 //! Memory stays flat however long the call: the parts are decoded packet by
-//! packet, each channel keeps at most one 30-second chunk, and decoded
-//! chunks keep only their text and timing. Every decoded chunk goes to the
-//! checkpoint first, so a cancelled or crashed run resumes.
+//! packet, each channel keeps at most one 30-second chunk (or one region of
+//! at most 90 s), and decoded work keeps only words and times. Everything
+//! decoded goes to the checkpoint first, so a cancelled or crashed run
+//! resumes.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,10 +21,12 @@ use recorder_core::decode::PartReader;
 use recorder_core::manifest::{Manifest, PartStatus, Status, TranscriptInfo, TranscriptStatus};
 use recorder_transcribe::checkpoint::Checkpoint;
 use recorder_transcribe::chunk::{Chunk, Chunker, MAX_CHUNK_SECONDS};
-use recorder_transcribe::model::{self, ModelPaths, ModelStatus};
+#[cfg(target_os = "macos")]
+use recorder_transcribe::hybrid::{self, Region};
+use recorder_transcribe::model::{self, ModelPaths, ModelStatus, Quality};
 use recorder_transcribe::output::{self, Document, FORMAT_VERSION, Settings, Speakers};
 use recorder_transcribe::protocol::Message;
-use recorder_transcribe::transcript::{self, ChunkResult, Utterance};
+use recorder_transcribe::transcript::{self, ChunkResult, Utterance, Word};
 use recorder_transcribe::{SAMPLE_RATE, Speaker, dialog};
 use sherpa_onnx::VoiceActivityDetector;
 
@@ -159,26 +167,49 @@ pub fn transcribe_mono<'e>(
 pub struct Options {
     pub model_dir: PathBuf,
     pub threads: u32,
+    pub quality: Quality,
 }
 
-fn settings(threads: u32) -> Settings {
+fn settings(opts: &Options) -> Settings {
     Settings {
-        threads,
-        decoding: "greedy_search".into(),
+        quality: opts.quality,
+        threads: opts.threads,
+        decoding: if opts.quality.needs_whisper() {
+            "parakeet: greedy_search; whisper: beam search 5, uk, no context, word segments".into()
+        } else {
+            "greedy_search".into()
+        },
         vad: vad_settings(),
         chunking: "speech segments joined without pauses".into(),
         max_chunk_speech_s: MAX_CHUNK_SECONDS as u32,
     }
 }
 
+fn engine_name(q: Quality) -> String {
+    if q.needs_whisper() {
+        format!("{} + {}", model::ENGINE, model::WHISPER_ENGINE)
+    } else {
+        model::ENGINE.into()
+    }
+}
+
+fn model_name(q: Quality) -> String {
+    if q.needs_whisper() {
+        format!("{} + {}", model::WHISPER_MODEL_NAME, model::MODEL_NAME)
+    } else {
+        model::MODEL_NAME.into()
+    }
+}
+
 /// Identifies results that can be reused (threads do not change the text).
-fn signature() -> String {
+fn signature(q: Quality) -> String {
     format!(
-        "{}|{}|{:?}|{}",
-        model::ENGINE,
-        model::MODEL_NAME,
+        "{}|{}|{:?}|{}|{}",
+        engine_name(q),
+        model_name(q),
         vad_settings(),
-        MAX_CHUNK_SECONDS
+        MAX_CHUNK_SECONDS,
+        q.as_str()
     )
 }
 
@@ -197,19 +228,24 @@ fn set_state(dir: &Path, state: Option<TranscriptInfo>) -> Result<()> {
     m.save(dir).context("cannot update manifest.json")
 }
 
-fn info(status: TranscriptStatus, files: Vec<String>, error: Option<String>) -> TranscriptInfo {
+fn info(
+    q: Quality,
+    status: TranscriptStatus,
+    files: Vec<String>,
+    error: Option<String>,
+) -> TranscriptInfo {
     TranscriptInfo {
         status,
         updated_at_utc: Utc::now(),
-        engine: model::ENGINE.into(),
-        model: model::MODEL_NAME.into(),
+        engine: engine_name(q),
+        model: model_name(q),
         files,
         error,
     }
 }
 
 /// Transcribes the session in `dir`; returns the files written. `stop`
-/// cancels between packets (the checkpoint keeps finished chunks).
+/// cancels between packets (the checkpoint keeps finished work).
 pub fn transcribe_session(
     dir: &Path,
     opts: &Options,
@@ -227,14 +263,21 @@ pub fn transcribe_session(
     if !manifest.parts.iter().any(|p| dir.join(&p.file).is_file()) {
         bail!("the audio files of this recording are missing (deleted or moved?)");
     }
-    if model::status(&opts.model_dir) != ModelStatus::Ready {
+    if !opts.quality.is_available() {
+        bail!("the Best quality needs macOS; use Fast");
+    }
+    if model::status(&opts.model_dir, opts.quality) != ModelStatus::Ready {
         bail!("the speech model is not downloaded");
     }
+    let q = opts.quality;
     let previous = manifest.transcript.clone();
-    set_state(dir, Some(info(TranscriptStatus::Running, vec![], None)))?;
+    set_state(dir, Some(info(q, TranscriptStatus::Running, vec![], None)))?;
     match run(dir, &manifest, opts, report, stop) {
         Ok(files) => {
-            set_state(dir, Some(info(TranscriptStatus::Done, files.clone(), None)))?;
+            set_state(
+                dir,
+                Some(info(q, TranscriptStatus::Done, files.clone(), None)),
+            )?;
             Ok(files)
         }
         Err(e) if e.is::<Cancelled>() => {
@@ -245,6 +288,7 @@ pub fn transcribe_session(
             let _ = set_state(
                 dir,
                 Some(info(
+                    q,
                     TranscriptStatus::Failed,
                     vec![],
                     Some(format!("{e:#}")),
@@ -255,52 +299,28 @@ pub fn transcribe_session(
     }
 }
 
-fn run(
+/// Receives `(left, right, timeline position)` blocks.
+type BlockFn<'a> = dyn FnMut(&[f32], &[f32], u64) -> Result<()> + 'a;
+
+/// Decodes the session's parts in order and hands out blocks, silence where
+/// a part is missing or unreadable. Returns the number of samples per
+/// channel.
+fn stream_session(
     dir: &Path,
     manifest: &Manifest,
-    opts: &Options,
-    report: &mut dyn FnMut(Message),
     stop: &AtomicBool,
-) -> Result<Vec<String>> {
-    let started = Instant::now();
-    let total_samples: u64 = manifest
-        .parts
-        .iter()
-        .map(|p| p.start_offset_ms + p.duration_ms)
-        .max()
-        .unwrap_or(0)
-        * SAMPLE_RATE as u64
-        / 1000;
-    let total_s = total_samples as f64 / SAMPLE_RATE as f64;
-
-    let engine = Engine::load(&ModelPaths::in_dir(&opts.model_dir), opts.threads)?;
-    let mut ckpt = Some(Checkpoint::open(dir, &signature())?);
-    report(Message::Started { audio_s: total_s });
-
-    let mut me = Channel::new(&engine, Speaker::Me)?;
-    let mut others = Channel::new(&engine, Speaker::Others)?;
+    on_block: &mut BlockFn<'_>,
+) -> Result<u64> {
     let mut fed: u64 = 0;
-    let mut last_report = Instant::now();
     let (mut left, mut right) = (Vec::new(), Vec::new());
     let mut block = Vec::new();
-    let mut progress = |fed: u64, force: bool, report: &mut dyn FnMut(Message)| {
-        if force || last_report.elapsed().as_millis() >= 500 {
-            last_report = Instant::now();
-            report(Message::Progress {
-                done_s: (fed as f64 / SAMPLE_RATE as f64).min(total_s),
-                total_s,
-            });
-        }
-    };
-
     for part in &manifest.parts {
         // Keep the timeline exact: silence where a part is missing.
         let at = part.start_offset_ms * SAMPLE_RATE as u64 / 1000;
         while fed < at {
             let n = (at - fed).min(SAMPLE_RATE as u64) as usize;
             let zeros = vec![0.0; n];
-            me.feed(&zeros, &mut ckpt)?;
-            others.feed(&zeros, &mut ckpt)?;
+            on_block(&zeros, &zeros, fed)?;
             fed += n as u64;
         }
         // A missing or unreadable part stays silence; the rest is transcribed.
@@ -323,29 +343,144 @@ fn run(
                 right.push(f[1]);
             }
             block.clear();
-            let before = me.chunks() + others.chunks();
-            me.feed(&left, &mut ckpt)?;
-            others.feed(&right, &mut ckpt)?;
+            on_block(&left, &right, fed)?;
             fed += left.len() as u64;
-            progress(fed, me.chunks() + others.chunks() > before, report);
         }
     }
-    me.finish(&mut ckpt)?;
-    others.finish(&mut ckpt)?;
-    progress(fed, true, report);
+    Ok(fed)
+}
 
-    let utterances = dialog::merge(
-        me.utterances(),
-        others.utterances(),
-        echo_possible(manifest),
-    );
+/// What the Parakeet pass leaves for the rest: words and speech segments.
+struct ChannelWords {
+    speaker: Speaker,
+    words: Vec<Word>,
+    /// Speech segments for the Whisper regions (macOS only).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    segments: Vec<(u64, usize)>,
+}
+
+impl Channel<'_> {
+    fn into_words(self) -> ChannelWords {
+        let mut segments: Vec<(u64, usize)> = self
+            .decoded
+            .iter()
+            .flat_map(|(c, _)| c.pieces.iter().map(|p| (p.start, p.len)))
+            .collect();
+        segments.sort_unstable();
+        ChannelWords {
+            speaker: self.speaker,
+            words: self
+                .decoded
+                .iter()
+                .flat_map(|(c, r)| transcript::chunk_words(c, r))
+                .collect(),
+            segments,
+        }
+    }
+}
+
+/// Reports progress at most twice a second (or when forced).
+struct Progress {
+    total_s: f64,
+    last: Instant,
+}
+
+impl Progress {
+    fn report(&mut self, done_s: f64, force: bool, report: &mut dyn FnMut(Message)) {
+        if force || self.last.elapsed().as_millis() >= 500 {
+            self.last = Instant::now();
+            report(Message::Progress {
+                done_s: done_s.clamp(0.0, self.total_s),
+                total_s: self.total_s,
+            });
+        }
+    }
+}
+
+/// Share of the time the Parakeet pass takes in the Best quality (Whisper
+/// is about 3-4 times slower).
+const PARAKEET_SHARE_BEST: f64 = 0.25;
+
+fn run(
+    dir: &Path,
+    manifest: &Manifest,
+    opts: &Options,
+    report: &mut dyn FnMut(Message),
+    stop: &AtomicBool,
+) -> Result<Vec<String>> {
+    let started = Instant::now();
+    let total_samples: u64 = manifest
+        .parts
+        .iter()
+        .map(|p| p.start_offset_ms + p.duration_ms)
+        .max()
+        .unwrap_or(0)
+        * SAMPLE_RATE as u64
+        / 1000;
+    let total_s = total_samples as f64 / SAMPLE_RATE as f64;
+    let share = if opts.quality.needs_whisper() {
+        PARAKEET_SHARE_BEST
+    } else {
+        1.0
+    };
+    let mut progress = Progress {
+        total_s,
+        last: Instant::now(),
+    };
+    let mut ckpt = Some(Checkpoint::open(dir, &signature(opts.quality))?);
+
+    // Pass 1: Parakeet. The engine is dropped before Whisper loads, so the
+    // two models never sit in memory together.
+    let channels = {
+        let engine = Engine::load(&ModelPaths::in_dir(&opts.model_dir), opts.threads)?;
+        report(Message::Started { audio_s: total_s });
+        let mut me = Channel::new(&engine, Speaker::Me)?;
+        let mut others = Channel::new(&engine, Speaker::Others)?;
+        stream_session(dir, manifest, stop, &mut |l, r, pos| {
+            let before = me.chunks() + others.chunks();
+            me.feed(l, &mut ckpt)?;
+            others.feed(r, &mut ckpt)?;
+            let s = (pos + l.len() as u64) as f64 / SAMPLE_RATE as f64;
+            progress.report(s * share, me.chunks() + others.chunks() > before, report);
+            Ok(())
+        })?;
+        me.finish(&mut ckpt)?;
+        others.finish(&mut ckpt)?;
+        [me.into_words(), others.into_words()]
+    };
+    progress.report(total_s * share, true, report);
+
+    // Pass 2 (Best): Whisper on the speech regions, merged with Parakeet.
+    let words: Vec<(Speaker, Vec<Word>)> = if opts.quality.needs_whisper() {
+        whisper_pass(
+            dir,
+            manifest,
+            opts,
+            &channels,
+            total_samples,
+            &mut ckpt,
+            &mut |done| progress.report(total_s * (share + (1.0 - share) * done), false, report),
+            stop,
+        )?
+    } else {
+        channels.into_iter().map(|c| (c.speaker, c.words)).collect()
+    };
+    progress.report(total_s, true, report);
+
+    let mut per: Vec<Vec<Utterance>> = words
+        .into_iter()
+        .map(|(sp, w)| transcript::group(sp, w))
+        .collect();
+    let others = per.pop().unwrap_or_default();
+    let me = per.pop().unwrap_or_default();
+    let utterances = dialog::merge(me, others, echo_possible(manifest));
     let doc = Document {
         format_version: FORMAT_VERSION,
         session_id: manifest.session_id.to_string(),
         created_at_utc: Utc::now(),
-        engine: model::ENGINE.into(),
-        model: model::MODEL_NAME.into(),
-        settings: settings(opts.threads),
+        engine: engine_name(opts.quality),
+        model: model_name(opts.quality),
+        settings: settings(opts),
         audio_s: total_s,
         processing_s: started.elapsed().as_secs_f64(),
         speakers: Speakers::default(),
@@ -360,4 +495,161 @@ fn run(
         processing_s: doc.processing_s,
     });
     Ok(files)
+}
+
+/// Merges per region; Parakeet words outside every region are kept as they are.
+#[cfg(target_os = "macos")]
+fn merge_regions(parakeet: &[Word], regions: &[Region], whisper: &[Vec<Word>]) -> Vec<Word> {
+    let mut out = Vec::new();
+    let mut used = vec![false; parakeet.len()];
+    for (r, w) in regions.iter().zip(whisper) {
+        let mut p = Vec::new();
+        for (i, x) in parakeet.iter().enumerate() {
+            if !used[i] && x.start >= r.start_s() - 0.5 && x.start < r.end_s() + 0.5 {
+                used[i] = true;
+                p.push(x.clone());
+            }
+        }
+        out.extend(hybrid::merge(&p, w));
+    }
+    let rest: Vec<Word> = parakeet
+        .iter()
+        .zip(&used)
+        .filter(|(_, u)| !**u)
+        .map(|(w, _)| w.clone())
+        .collect();
+    if !rest.is_empty() {
+        out.extend(rest);
+        out.sort_by(|a, b| a.start.total_cmp(&b.start));
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn whisper_pass(
+    dir: &Path,
+    manifest: &Manifest,
+    opts: &Options,
+    channels: &[ChannelWords; 2],
+    total_samples: u64,
+    ckpt: &mut Option<Checkpoint>,
+    progress: &mut dyn FnMut(f64),
+    stop: &AtomicBool,
+) -> Result<Vec<(Speaker, Vec<Word>)>> {
+    use crate::whisper::WhisperEngine;
+
+    let whisper = WhisperEngine::load(&ModelPaths::in_dir(&opts.model_dir).whisper, opts.threads)?;
+    let regions: Vec<Vec<Region>> = channels
+        .iter()
+        .map(|c| hybrid::regions(&c.segments, total_samples))
+        .collect();
+    let work: f64 = regions
+        .iter()
+        .flatten()
+        .map(|r| r.len() as f64)
+        .sum::<f64>()
+        .max(1.0);
+    let mut done_work = 0.0;
+    let mut results: Vec<Vec<Vec<Word>>> =
+        regions.iter().map(|r| vec![Vec::new(); r.len()]).collect();
+    // Per channel: the region being filled and its samples.
+    let mut next = [0usize; 2];
+    let mut bufs: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    let mut finish_region =
+        |ch: usize, k: usize, samples: &[f32], ckpt: &mut Option<Checkpoint>| -> Result<()> {
+            let r = regions[ch][k];
+            let sp = channels[ch].speaker;
+            let known = ckpt
+                .as_ref()
+                .and_then(|c| c.get_whisper(sp, r.start, r.len()).cloned());
+            let words = match known {
+                Some(w) => w,
+                None => {
+                    let w = whisper.transcribe(samples, r.start_s())?;
+                    if let Some(c) = ckpt {
+                        c.record_whisper(sp, r.start, r.len(), &w)
+                            .context("cannot write the checkpoint")?;
+                    }
+                    w
+                }
+            };
+            results[ch][k] = words;
+            done_work += r.len() as f64;
+            progress(done_work / work);
+            Ok(())
+        };
+    stream_session(dir, manifest, stop, &mut |l, r, pos| {
+        let end = pos + l.len() as u64;
+        for (ch, block) in [l, r].into_iter().enumerate() {
+            while let Some(reg) = regions[ch].get(next[ch]).copied() {
+                if reg.start >= end {
+                    break;
+                }
+                let a = reg.start.max(pos);
+                let b = reg.end.min(end);
+                if a < b {
+                    bufs[ch].extend_from_slice(&block[(a - pos) as usize..(b - pos) as usize]);
+                }
+                if reg.end > end {
+                    break; // continues in the next block
+                }
+                let samples = std::mem::take(&mut bufs[ch]);
+                finish_region(ch, next[ch], &samples, ckpt)?;
+                next[ch] += 1;
+            }
+        }
+        Ok(())
+    })?;
+    // Regions running to the very end of the recording.
+    for ch in 0..2 {
+        while next[ch] < regions[ch].len() {
+            let samples = std::mem::take(&mut bufs[ch]);
+            finish_region(ch, next[ch], &samples, ckpt)?;
+            next[ch] += 1;
+        }
+    }
+    Ok(channels
+        .iter()
+        .enumerate()
+        .map(|(ch, c)| {
+            (
+                c.speaker,
+                merge_regions(&c.words, &regions[ch], &results[ch]),
+            )
+        })
+        .collect())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn whisper_pass(
+    _dir: &Path,
+    _manifest: &Manifest,
+    _opts: &Options,
+    _channels: &[ChannelWords; 2],
+    _total_samples: u64,
+    _ckpt: &mut Option<Checkpoint>,
+    _progress: &mut dyn FnMut(f64),
+    _stop: &AtomicBool,
+) -> Result<Vec<(Speaker, Vec<Word>)>> {
+    bail!("the Best quality needs macOS")
+}
+
+/// The Best quality on one mono signal (checks and `wav --quality best`):
+/// Parakeet words, Whisper per region, merged.
+#[cfg(target_os = "macos")]
+pub fn hybrid_mono(
+    engine: &Engine,
+    whisper: &crate::whisper::WhisperEngine,
+    speaker: Speaker,
+    samples: &[f32],
+) -> Result<Vec<Word>> {
+    let ch = transcribe_mono(engine, speaker, samples)?.into_words();
+    let regions = hybrid::regions(&ch.segments, samples.len() as u64);
+    let mut results = Vec::with_capacity(regions.len());
+    for r in &regions {
+        results.push(whisper.transcribe(&samples[r.start as usize..r.end as usize], r.start_s())?);
+    }
+    Ok(merge_regions(&ch.words, &regions, &results))
 }

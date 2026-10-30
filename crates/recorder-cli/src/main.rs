@@ -25,7 +25,7 @@ use recorder_capture::{mic, output};
 use recorder_core::decode::{decode_part, rms_dbfs, write_wav};
 use recorder_core::manifest::{Manifest, PartStatus};
 use recorder_core::{MIC, SYSTEM};
-use recorder_transcribe::model::ModelStatus;
+use recorder_transcribe::model::{ModelStatus, Quality};
 
 #[derive(Parser)]
 #[command(
@@ -104,6 +104,9 @@ enum Cmd {
     /// Transcribe a session locally into transcript.txt/json/srt.
     Transcribe {
         session: PathBuf,
+        /// best (Whisper + Parakeet, macOS) or fast (Parakeet); default: the setting.
+        #[arg(long)]
+        quality: Option<String>,
         /// Recognizer threads (default: the setting, 2).
         #[arg(long)]
         threads: Option<u32>,
@@ -115,6 +118,9 @@ enum Cmd {
     Model {
         #[command(subcommand)]
         action: ModelAction,
+        /// best or fast: which models (default: the setting).
+        #[arg(long, global = true)]
+        quality: Option<String>,
         /// Folder with the speech model (default: the setting).
         #[arg(long, global = true)]
         model_dir: Option<PathBuf>,
@@ -196,11 +202,13 @@ fn main() -> Result<()> {
         Cmd::Verify { session, wav } => verify(&session, wav),
         Cmd::Transcribe {
             session,
+            quality,
             threads,
             model_dir,
         } => {
             let dir = model_dir.unwrap_or_else(|| settings.models_dir());
-            if transcription::model_status(&dir) != ModelStatus::Ready {
+            let quality = quality_arg(quality.as_deref(), &settings)?;
+            if transcription::model_status(&dir, quality) != ModelStatus::Ready {
                 anyhow::bail!(
                     "the speech model is not in {}; run `recorder model download`",
                     dir.display()
@@ -215,6 +223,8 @@ fn main() -> Result<()> {
                 .arg(&dir)
                 .arg("--threads")
                 .arg(threads.to_string())
+                .arg("--quality")
+                .arg(quality.as_str())
                 .status()
                 .context("cannot start the transcriber")?;
             if !status.success() {
@@ -228,21 +238,38 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Model { action, model_dir } => {
+        Cmd::Model {
+            action,
+            quality,
+            model_dir,
+        } => {
             let dir = model_dir.unwrap_or_else(|| settings.models_dir());
-            model_command(action, &dir)
+            model_command(action, &dir, quality_arg(quality.as_deref(), &settings)?)
         }
     }
 }
 
-fn model_command(action: ModelAction, dir: &Path) -> Result<()> {
+fn quality_arg(arg: Option<&str>, settings: &Settings) -> Result<Quality> {
+    let q = match arg {
+        Some(s) => Quality::parse(s).context("--quality must be best or fast")?,
+        None => settings.transcription_quality(),
+    };
+    anyhow::ensure!(
+        q.is_available(),
+        "the best quality needs macOS; use --quality fast"
+    );
+    Ok(q)
+}
+
+fn model_command(action: ModelAction, dir: &Path, quality: Quality) -> Result<()> {
     use recorder_transcribe::model;
     match action {
         ModelAction::Status => {
             println!(
-                "{}: {:?}, {:.0} MiB on disk",
+                "{} ({} quality): {:?}, {:.0} MiB on disk",
                 dir.display(),
-                model::status(dir),
+                quality.as_str(),
+                model::status(dir, quality),
                 model::disk_size(dir) as f64 / 1048576.0
             );
         }
@@ -257,6 +284,7 @@ fn model_command(action: ModelAction, dir: &Path) -> Result<()> {
             let mut last = std::time::Instant::now();
             model::download(
                 dir,
+                quality,
                 &mut |p| {
                     if last.elapsed() >= Duration::from_millis(500) {
                         last = std::time::Instant::now();
@@ -274,7 +302,7 @@ fn model_command(action: ModelAction, dir: &Path) -> Result<()> {
             println!("OK: model downloaded and verified.");
         }
         ModelAction::Verify => {
-            model::verify(dir)?;
+            model::verify(dir, quality)?;
             println!("OK: all model files match their SHA256.");
         }
         ModelAction::Delete => {

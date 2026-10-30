@@ -37,6 +37,8 @@ pub struct VadSettings {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub quality: crate::model::Quality,
     pub threads: u32,
     pub decoding: String,
     pub vad: VadSettings,
@@ -177,6 +179,7 @@ mod tests {
             engine: "sherpa-onnx 1.13.8".into(),
             model: "parakeet".into(),
             settings: Settings {
+                quality: crate::model::Quality::Best,
                 threads: 2,
                 decoding: "greedy_search".into(),
                 vad: VadSettings {

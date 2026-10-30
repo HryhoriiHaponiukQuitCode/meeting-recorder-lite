@@ -10,3 +10,5 @@
 
 pub mod engine;
 pub mod pipeline;
+#[cfg(target_os = "macos")]
+pub mod whisper;

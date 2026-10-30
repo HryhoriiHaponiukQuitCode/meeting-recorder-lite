@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::Speaker;
-use crate::transcript::ChunkResult;
+use crate::transcript::{ChunkResult, Word};
 
 pub const PARTIAL_FILE: &str = "transcript.partial.jsonl";
 
@@ -28,7 +28,13 @@ struct Entry {
     speaker: Speaker,
     start: u64,
     len: usize,
+    /// A Parakeet chunk (`result`) or a Whisper region (`words`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    whisper: bool,
+    #[serde(default)]
     result: ChunkResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    words: Vec<Word>,
 }
 
 type Key = (Speaker, u64, usize);
@@ -37,6 +43,7 @@ pub struct Checkpoint {
     path: PathBuf,
     file: File,
     done: HashMap<Key, ChunkResult>,
+    whisper: HashMap<Key, Vec<Word>>,
 }
 
 impl Checkpoint {
@@ -48,6 +55,7 @@ impl Checkpoint {
             signature: signature.to_string(),
         };
         let mut done = HashMap::new();
+        let mut whisper = HashMap::new();
         let mut valid = false;
         if let Ok(f) = File::open(&path) {
             let mut lines = BufReader::new(f).lines();
@@ -57,7 +65,11 @@ impl Checkpoint {
             if valid {
                 for line in lines.map_while(Result::ok) {
                     if let Ok(e) = serde_json::from_str::<Entry>(&line) {
-                        done.insert((e.speaker, e.start, e.len), e.result);
+                        if e.whisper {
+                            whisper.insert((e.speaker, e.start, e.len), e.words);
+                        } else {
+                            done.insert((e.speaker, e.start, e.len), e.result);
+                        }
                     }
                 }
             }
@@ -80,12 +92,17 @@ impl Checkpoint {
             f.sync_data()?;
             f
         };
-        Ok(Self { path, file, done })
+        Ok(Self {
+            path,
+            file,
+            done,
+            whisper,
+        })
     }
 
-    /// Chunks already decoded by an earlier run.
+    /// Chunks and regions already decoded by an earlier run.
     pub fn resumed(&self) -> usize {
-        self.done.len()
+        self.done.len() + self.whisper.len()
     }
 
     pub fn get(&self, speaker: Speaker, start: u64, len: usize) -> Option<&ChunkResult> {
@@ -103,16 +120,47 @@ impl Checkpoint {
             speaker,
             start,
             len,
+            whisper: false,
             result: result.clone(),
+            words: Vec::new(),
         };
+        self.append(&e)?;
+        self.done.insert((speaker, start, len), result.clone());
+        Ok(())
+    }
+
+    /// Whisper's words for a region decoded by an earlier run.
+    pub fn get_whisper(&self, speaker: Speaker, start: u64, len: usize) -> Option<&Vec<Word>> {
+        self.whisper.get(&(speaker, start, len))
+    }
+
+    pub fn record_whisper(
+        &mut self,
+        speaker: Speaker,
+        start: u64,
+        len: usize,
+        words: &[Word],
+    ) -> io::Result<()> {
+        let e = Entry {
+            speaker,
+            start,
+            len,
+            whisper: true,
+            result: ChunkResult::default(),
+            words: words.to_vec(),
+        };
+        self.append(&e)?;
+        self.whisper.insert((speaker, start, len), words.to_vec());
+        Ok(())
+    }
+
+    fn append(&mut self, e: &Entry) -> io::Result<()> {
         writeln!(
             self.file,
             "{}",
-            serde_json::to_string(&e).map_err(io::Error::other)?
+            serde_json::to_string(e).map_err(io::Error::other)?
         )?;
-        self.file.sync_data()?;
-        self.done.insert((speaker, start, len), result.clone());
-        Ok(())
+        self.file.sync_data()
     }
 
     /// Removes the file after the transcript is written.
@@ -146,6 +194,8 @@ mod tests {
         let mut c = Checkpoint::open(&d, "sig").unwrap();
         c.record(Speaker::Me, 100, 50, &r("a")).unwrap();
         c.record(Speaker::Others, 100, 50, &r("b")).unwrap();
+        c.record_whisper(Speaker::Others, 100, 50, &[Word::new("слово", 1.0, 1.2)])
+            .unwrap();
         drop(c);
         // Crash while writing the third line.
         let mut f = OpenOptions::new()
@@ -156,15 +206,23 @@ mod tests {
         drop(f);
 
         let mut c = Checkpoint::open(&d, "sig").unwrap();
-        assert_eq!(c.resumed(), 2);
+        assert_eq!(c.resumed(), 3);
         assert_eq!(c.get(Speaker::Me, 100, 50).unwrap().text, "a");
+        assert_eq!(
+            c.get_whisper(Speaker::Others, 100, 50).unwrap()[0].text,
+            "слово"
+        );
+        assert!(
+            c.get_whisper(Speaker::Me, 100, 50).is_none(),
+            "Parakeet and Whisper are kept apart"
+        );
         assert!(c.get(Speaker::Me, 100, 51).is_none());
         c.record(Speaker::Me, 900, 10, &r("c")).unwrap();
         drop(c);
         let c = Checkpoint::open(&d, "sig").unwrap();
         assert_eq!(
             c.resumed(),
-            3,
+            4,
             "the broken line was cut off before appending"
         );
         c.remove().unwrap();

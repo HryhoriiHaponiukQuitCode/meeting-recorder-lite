@@ -21,7 +21,7 @@ use recorder_app::permissions::{self, Access, Permission};
 use recorder_app::sessions::{self, SessionInfo};
 use recorder_app::settings::Settings;
 use recorder_app::transcription::{
-    self, JobOutcome, ModelDownload, Phase, TranscriptState, TranscriptionJob,
+    self, JobOutcome, ModelDownload, Phase, Quality, TranscriptState, TranscriptionJob,
 };
 use recorder_app::{
     APP_NAME, AecMode, CONSENT_REMINDER, Monitor, Notice, Recorder, RecorderOptions, Status,
@@ -500,7 +500,8 @@ impl App {
     /// Model and transcript states as they are on disk.
     fn check_disk(&mut self) {
         let dir = self.settings.models_dir();
-        self.model_status = transcription::model_status(&dir);
+        self.model_status =
+            transcription::model_status(&dir, self.settings.transcription_quality());
         self.model_size = transcription::model_disk_size(&dir);
         self.last_transcript = self.last.as_ref().map_or(TranscriptState::None, |l| {
             transcription::transcript_state(&l.dir)
@@ -544,6 +545,7 @@ impl App {
             &dir,
             &self.settings.models_dir(),
             self.settings.transcription_threads(),
+            self.settings.transcription_quality(),
         ) {
             Ok(job) => self.job = Some(job),
             Err(e) => {
@@ -559,7 +561,10 @@ impl App {
 
     fn start_download(&mut self) {
         if self.download.is_none() {
-            self.download = Some(ModelDownload::start(self.settings.models_dir()));
+            self.download = Some(ModelDownload::start(
+                self.settings.models_dir(),
+                self.settings.transcription_quality(),
+            ));
         }
     }
 
@@ -1306,15 +1311,42 @@ impl App {
         ));
         ui.add_space(ui::S2);
 
+        // Quality: only where there is a choice (macOS).
+        let quality = self.settings.transcription_quality();
+        if Quality::available().len() > 1 {
+            ui.label(ui::caption("Quality"));
+            ui.add_space(ui::S1);
+            let mut q = quality;
+            if ui::segmented(
+                ui,
+                &mut q,
+                &[(Quality::Best, "Best"), (Quality::Fast, "Fast")],
+            ) {
+                self.settings.transcription_quality = q;
+                self.save_settings();
+                self.check_disk();
+            }
+            ui.label(ui::muted(match q {
+                Quality::Best => {
+                    "Whisper writes the text and Parakeet fills in what it skips: the most accurate. \
+                     An hour of call takes about 10–20 minutes."
+                }
+                Quality::Fast => {
+                    "Parakeet alone: an hour of call takes about 2 minutes, with more mistakes \
+                     in words and terms."
+                }
+            }));
+            ui.add_space(ui::S3);
+        }
+
         // The model: download, progress, delete.
         let mb = |bytes: u64| bytes as f64 / 1_048_576.0;
         let (mut start, mut cancel, mut delete) = (false, false, false);
         if let Some(state) = &download {
-            let (done, total, phase) = state
-                .progress
-                .map_or((0, transcription::DOWNLOAD_SIZE, Phase::Downloading), |p| {
-                    (p.done, p.total, p.phase)
-                });
+            let (done, total, phase) = state.progress.map_or(
+                (0, transcription::download_size(quality), Phase::Downloading),
+                |p| (p.done, p.total, p.phase),
+            );
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(match phase {
@@ -1339,7 +1371,7 @@ impl App {
         } else if self.model_status == ModelStatus::Ready {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(format!("Speech model · {:.0} MB", mb(self.model_size)))
+                    RichText::new(format!("Speech models · {:.0} MB", mb(self.model_size)))
                         .color(ui::INK),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1349,15 +1381,18 @@ impl App {
                 });
             });
         } else {
-            let label = format!(
-                "Download speech model ({:.0} MB)",
-                mb(transcription::DOWNLOAD_SIZE)
-            );
+            let missing = transcription::missing_bytes(&self.settings.models_dir(), quality);
+            let label = format!("Download speech models ({:.0} MB)", mb(missing));
             start = ui::primary(ui, &label, None, None, true).clicked();
             ui.add_space(ui::S1);
-            ui.label(ui::muted(
-                "Once. Takes about 640 MB on disk and 1.5 GB of memory while transcribing.",
-            ));
+            ui.label(ui::muted(match quality {
+                Quality::Best => {
+                    "Once. About 1.5 GB on disk and up to 2 GB of memory while transcribing."
+                }
+                Quality::Fast => {
+                    "Once. Takes about 640 MB on disk and 1.5 GB of memory while transcribing."
+                }
+            }));
         }
         if start {
             self.start_download();
@@ -1408,10 +1443,17 @@ impl App {
             self.settings.transcription_threads = threads;
             self.save_settings();
         }
-        ui.label(ui::muted(if threads >= 4 {
-            "Uses more of the processor; about a quarter faster. An hour takes about 1.5 minutes."
-        } else {
-            "Keeps the computer cool and quiet. An hour of call takes about 2 minutes."
+        ui.label(ui::muted(match (quality, threads >= 4) {
+            (Quality::Fast, true) => {
+                "Uses more of the processor; about a quarter faster. An hour takes about 1.5 minutes."
+            }
+            (Quality::Fast, false) => {
+                "Keeps the computer cool and quiet. An hour of call takes about 2 minutes."
+            }
+            (Quality::Best, true) => "Uses more of the processor; somewhat faster.",
+            (Quality::Best, false) => {
+                "Keeps the processor cooler; Whisper runs on the graphics processor either way."
+            }
         }));
 
         ui.add_space(ui::S3);
