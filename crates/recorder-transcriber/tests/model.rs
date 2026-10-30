@@ -289,8 +289,12 @@ fn sessions_become_a_dialogue_with_speakers_and_times() {
     }
     assert!(doc.utterances.windows(2).all(|w| w[0].start <= w[1].start));
     let txt = std::fs::read_to_string(one.join(TXT_FILE)).unwrap();
-    let me_line = txt.find("] Me: ").unwrap();
-    let others_line = txt.find("] Others: ").unwrap();
+    // Labels from the participants: the microphone speaks first.
+    let me_label = doc.label(Speaker::Me, None);
+    let others_label = doc.label(Speaker::Others, None);
+    assert_ne!(me_label, others_label);
+    let me_line = txt.find(&format!("] {me_label}: ")).unwrap();
+    let others_line = txt.find(&format!("] {others_label}: ")).unwrap();
     assert!(me_line < others_line);
     let m = Manifest::load(&one).unwrap();
     assert_eq!(
@@ -375,8 +379,13 @@ fn echo_of_the_other_side_is_hidden() {
     );
     assert!(!me.is_empty());
     assert_eq!(hidden, me.len(), "{me:#?}");
-    let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
-    assert!(!txt.contains("] Me: "), "{txt}");
+    // The microphone said nothing of its own: no participant for it.
+    let d = document(&dir);
+    assert!(
+        d.participants.iter().all(|p| p.speaker != Speaker::Me),
+        "{:?}",
+        d.participants
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -606,11 +615,14 @@ fn voices_tell_people_apart() {
         );
     }
     assert!((4..=5).contains(&d.others_voices), "{}", d.others_voices);
-    // In order of appearance: the first reader is Others 1, the second 2.
+    // In order of appearance: the first reader is voice 1, the second 2.
     assert_eq!(top(&by_clip["1272-128104-0004"]).0, 1);
     assert_eq!(top(&by_clip["1462-170138-0024"]).0, 2);
     let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
-    assert!(txt.contains("] Others 1: ") && txt.contains("] Others 4: "));
-    assert!(!txt.contains("] Others: "));
+    for v in 1..=4 {
+        let label = d.label(Speaker::Others, Some(v));
+        assert!(txt.contains(&format!("] {label}: ")), "{label}");
+    }
+    assert!(!txt.contains("] Others"));
     std::fs::remove_dir_all(root).ok();
 }

@@ -1438,7 +1438,7 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.label(RichText::new("Tell voices apart").font(FontId::new(14.0, ui::medium())));
                 ui.label(ui::muted(
-                    "Others 1, Others 2… for different people on the call",
+                    "A name or Participant 1, 2… for each person on the call",
                 ));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

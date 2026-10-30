@@ -547,6 +547,7 @@ fn run(
         processing_s: started.elapsed().as_secs_f64(),
         speakers: Speakers::default(),
         others_voices,
+        participants: output::participants(&utterances),
         utterances,
     };
     let files = output::write_all(dir, &doc).context("cannot write the transcript")?;
@@ -670,6 +671,7 @@ pub fn relabel_voices(dir: &Path, opts: &Options) -> Result<u32> {
         transcript::group(Speaker::Others, others),
         echo_possible(&manifest),
     );
+    doc.participants = output::participants(&doc.utterances);
     output::write_all(dir, &doc).context("cannot write the transcript")?;
     Ok(doc.others_voices)
 }

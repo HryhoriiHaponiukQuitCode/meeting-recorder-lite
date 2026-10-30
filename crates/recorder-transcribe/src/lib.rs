@@ -21,6 +21,7 @@ pub mod chunk;
 pub mod dialog;
 pub mod hybrid;
 pub mod model;
+pub mod names;
 pub mod output;
 pub mod protocol;
 pub mod transcript;

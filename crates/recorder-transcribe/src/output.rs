@@ -84,7 +84,50 @@ pub struct Document {
     /// Voices told apart on the system audio (0 = not separated or one).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub others_voices: u32,
+    /// Who speaks: a name found in the conversation, else "Participant N"
+    /// (see [`crate::names`]). Empty in transcripts made before names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<Participant>,
     pub utterances: Vec<Utterance>,
+}
+
+/// One participant: the microphone, or one voice of the system audio.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Participant {
+    pub speaker: crate::Speaker,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<u32>,
+    /// Found in the conversation ("Дякую, Роман, за коментар").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What the text shows: the name or "Participant N".
+    pub label: String,
+}
+
+impl Document {
+    /// The label of a speaker and voice: the participant's, or the channel
+    /// name in transcripts made before names.
+    pub fn label(&self, speaker: crate::Speaker, voice: Option<u32>) -> String {
+        self.participants
+            .iter()
+            .find(|p| p.speaker == speaker && p.voice == voice)
+            .map(|p| p.label.clone())
+            .unwrap_or_else(|| crate::transcript::label(speaker, voice))
+    }
+}
+
+/// Participants of a dialogue with their labels (names where found).
+pub fn participants(dialog: &[Utterance]) -> Vec<Participant> {
+    let names = crate::names::find(dialog);
+    crate::names::labels(dialog, &names)
+        .into_iter()
+        .map(|((speaker, voice), label)| Participant {
+            speaker,
+            voice,
+            name: names.get(&(speaker, voice)).cloned(),
+            label,
+        })
+        .collect()
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -125,23 +168,48 @@ fn srt_time(t: f64) -> String {
 }
 
 pub fn txt(doc: &Document) -> String {
-    let mut s = format!(
-        "Transcript of a {} recording. Me = microphone, Others = system audio.\n\
-         Times are positions in the recording. Transcribed locally with {} ({}).\n\n",
-        clock(doc.audio_s),
-        doc.model,
-        doc.engine
-    );
-    if doc.others_voices > 1 {
-        s.insert_str(
-            s.len() - 1,
-            &format!(
-                "Others 1–{} are different voices on the system audio, told apart automatically \
-                 (numbered in order of appearance; may be wrong for short replies).\n",
-                doc.others_voices
-            ),
+    let mut s = if doc.participants.is_empty() {
+        format!(
+            "Transcript of a {} recording. Me = microphone, Others = system audio.\n",
+            clock(doc.audio_s)
+        )
+    } else {
+        let list = |sp: crate::Speaker| {
+            let l: Vec<&str> = doc
+                .participants
+                .iter()
+                .filter(|p| p.speaker == sp)
+                .map(|p| p.label.as_str())
+                .collect();
+            if l.is_empty() {
+                "-".to_string()
+            } else {
+                l.join(", ")
+            }
+        };
+        let mut h = format!(
+            "Transcript of a {} recording. Microphone: {}. System audio: {}.\n",
+            clock(doc.audio_s),
+            list(crate::Speaker::Me),
+            list(crate::Speaker::Others)
         );
-    }
+        if doc.others_voices > 1 {
+            h.push_str(
+                "Voices on the system audio are told apart by sound; short replies may land on \
+                 the wrong one.\n",
+            );
+        }
+        if doc.participants.iter().any(|p| p.name.is_some()) {
+            h.push_str(
+                "Names come from how people address each other in the call and may be wrong.\n",
+            );
+        }
+        h
+    };
+    s.push_str(&format!(
+        "Times are positions in the recording. Transcribed locally with {} ({}).\n\n",
+        doc.model, doc.engine
+    ));
     let t: Vec<Turn> = turns(&doc.utterances);
     if t.is_empty() {
         s.push_str("(no speech found)\n");
@@ -150,7 +218,7 @@ pub fn txt(doc: &Document) -> String {
         s.push_str(&format!(
             "[{}] {}: {}\n",
             clock(turn.start),
-            crate::transcript::label(turn.speaker, turn.voice),
+            doc.label(turn.speaker, turn.voice),
             turn.text
         ));
     }
@@ -167,7 +235,7 @@ pub fn srt(doc: &Document) -> String {
             i + 1,
             srt_time(u.start),
             srt_time(end),
-            u.label(),
+            doc.label(u.speaker, u.voice),
             u.text
         ));
     }
@@ -238,6 +306,7 @@ mod tests {
             processing_s: 1.0,
             speakers: Speakers::default(),
             others_voices: 0,
+            participants: vec![],
             utterances: vec![
                 u(Speaker::Others, 1.0, 2.0, "Привіт.", false),
                 u(Speaker::Me, 1.2, 1.9, "привіт", true),
@@ -259,6 +328,50 @@ mod tests {
             s.starts_with("1\n00:00:01,000 --> 00:00:02,000\nOthers: Привіт.\n\n2\n01:01:01,250")
         );
         assert_eq!(s.matches(" --> ").count(), 2);
+    }
+
+    #[test]
+    fn participants_label_the_text() {
+        let mut d = doc();
+        d.utterances[0].voice = Some(1);
+        d.utterances.push(Utterance {
+            voice: Some(2),
+            ..d.utterances[0].clone()
+        });
+        d.others_voices = 2;
+        d.participants = vec![
+            Participant {
+                speaker: Speaker::Others,
+                voice: Some(1),
+                name: None,
+                label: "Participant 1".into(),
+            },
+            Participant {
+                speaker: Speaker::Others,
+                voice: Some(2),
+                name: Some("Катя".into()),
+                label: "Катя".into(),
+            },
+            Participant {
+                speaker: Speaker::Me,
+                voice: None,
+                name: None,
+                label: "Participant 2".into(),
+            },
+        ];
+        let t = txt(&d);
+        assert!(
+            t.contains("Microphone: Participant 2. System audio: Participant 1, Катя.\n"),
+            "{t}"
+        );
+        assert!(t.contains("[00:00:01] Participant 1: Привіт.\n"), "{t}");
+        assert!(t.contains("] Катя: Привіт.\n"), "{t}");
+        assert!(
+            t.contains("[01:01:01] Participant 2: Добрий день.\n"),
+            "{t}"
+        );
+        assert!(t.contains("Names come from how people address each other"));
+        assert!(srt(&d).contains("Катя: Привіт."));
     }
 
     #[test]
