@@ -8,15 +8,21 @@
 //! перегляд"). Parakeet misses words less often but writes more of them
 //! wrongly. So:
 //!
-//! 1. **English regions** (Parakeet sentences that are mostly Latin, joined
-//!    when less than [`EN_JOIN_S`] apart) are taken from Parakeet.
+//! 1. **English** is taken from Parakeet: a whole region when most of its
+//!    Parakeet words are Latin ([`REGION_LATIN_SHARE`]; an English call),
+//!    else the Parakeet sentences that are mostly Latin, joined when less
+//!    than [`EN_JOIN_S`] apart.
 //! 2. Elsewhere the two word sequences are **aligned by text** (Whisper's
 //!    timestamps around a skip are stretched over it, so time alone misses
 //!    it). A run of at least [`MIN_RUN`] Parakeet words with no Whisper
 //!    counterpart is inserted where it belongs.
-//! 3. A run of at least [`HALLUCINATION_MIN`] Whisper words with no
-//!    Parakeet counterpart and no Parakeet word at that time is dropped.
-//!    Shorter runs stay: they are often real words Parakeet missed.
+//! 3. Whisper words with no Parakeet counterpart are dropped as invented
+//!    when the run is at least [`HALLUCINATION_MIN`] long with no Parakeet
+//!    word at that time, when Parakeet heard nothing within [`ISOLATED_S`]
+//!    of it (a lone "Дякую." on a quiet microphone), or when it is one of
+//!    Whisper's known inventions ("Субтитрувальниця…", "Дякую за
+//!    перегляд!"). Other short runs stay: they are often real words
+//!    Parakeet missed.
 //!
 //! Whisper runs on [`Region`]s: speech with the pauses inside kept (it is
 //! more complete with natural pauses), cut where the pause is long.
@@ -29,8 +35,30 @@ pub const MIN_RUN: usize = 4;
 /// Unmatched Whisper words in a row (with no Parakeet word at that time)
 /// treated as invented.
 pub const HALLUCINATION_MIN: usize = 5;
+/// Shorter unmatched Whisper runs are dropped when no Parakeet word is
+/// within this many seconds.
+pub const ISOLATED_S: f64 = 1.0;
+/// Text Whisper invents on silence, noise and music (subtitle credits from
+/// its training data), lower case without punctuation.
+const KNOWN_INVENTIONS: &[&str] = &[
+    "субтитр",
+    "дякую за перегляд",
+    "дякуємо за перегляд",
+    "продовження слідує",
+    "підписуйтесь",
+    "підписуйтеся",
+    "редактор субтитрів",
+    "amara",
+    "thanks for watching",
+    "thank you for watching",
+];
+/// Paired words less similar than this (0..=1) are unrelated.
+const UNRELATED_BELOW: f64 = 0.25;
 /// A Parakeet sentence with at least this share of Latin words is English.
 pub const LATIN_SHARE: f64 = 0.7;
+/// A region with at least this share of Latin Parakeet words is English as
+/// a whole: Whisper told to write Ukrainian turns English into Cyrillic.
+pub const REGION_LATIN_SHARE: f64 = 0.5;
 /// English sentences closer than this form one region.
 pub const EN_JOIN_S: f64 = 3.0;
 
@@ -227,6 +255,13 @@ fn tagged(w: &Word, source: &str) -> Word {
 /// Merges one region's (or one channel's) words, both on the recording
 /// timeline. The result is in reading order.
 pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
+    let latin = parakeet.iter().filter(|w| is_latin(w)).count();
+    if !parakeet.is_empty() && latin as f64 >= REGION_LATIN_SHARE * parakeet.len() as f64 {
+        return parakeet
+            .iter()
+            .map(|w| tagged(w, SOURCE_PARAKEET_EN))
+            .collect();
+    }
     let regions = english_regions(parakeet);
     let inside = |w: &Word| {
         let mid = (w.start + w.end) / 2.0;
@@ -255,11 +290,18 @@ pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
         }
         run.clear();
     };
+    // A pair of unrelated words (another alphabet, or hardly a letter in
+    // common) does not confirm Whisper's word.
+    let unrelated = |i: usize, j: usize| {
+        is_latin(&p[i]) != is_latin(&w[j])
+            || similarity(&norm(&p[i].text), &norm(&w[j].text)) < UNRELATED_BELOW
+    };
     for (i, j) in align(&p, &w) {
         match (i, j) {
             (_, Some(j)) => {
                 flush(&mut run, &mut seq, Some(&w[j]));
-                seq.push((tagged(&w[j], SOURCE_WHISPER), i.is_none()));
+                let alone = i.is_none_or(|i| unrelated(i, j));
+                seq.push((tagged(&w[j], SOURCE_WHISPER), alone));
             }
             (Some(i), None) => run.push(p[i].clone()),
             (None, None) => {}
@@ -267,7 +309,52 @@ pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
     }
     flush(&mut run, &mut seq, None);
 
-    // Invented text: long unmatched Whisper runs with no Parakeet word near.
+    // Known inventions, unless Parakeet has the phrase too.
+    let heard_text = parakeet
+        .iter()
+        .map(|x| norm(&x.text))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let invention_in = |i: usize, len: usize| {
+        let phrase = seq[i..i + len]
+            .iter()
+            .map(|(w, _)| norm(&w.text))
+            .collect::<Vec<_>>()
+            .join(" ");
+        KNOWN_INVENTIONS
+            .iter()
+            .any(|p| phrase.contains(p) && !heard_text.contains(p))
+    };
+    let mut known = vec![false; seq.len()];
+    for i in 0..seq.len() {
+        for len in 1..=4.min(seq.len() - i) {
+            // Only the smallest stretch holding the phrase.
+            let smallest = len == 1 || !(invention_in(i + 1, len - 1) || invention_in(i, len - 1));
+            if smallest && invention_in(i, len) {
+                known[i..i + len].iter_mut().for_each(|k| *k = true);
+            }
+        }
+    }
+    // The rest of an unconfirmed run with an invention in it goes too
+    // ("Субтитрувальниця Оля Шор").
+    for i in 0..seq.len() {
+        if known[i] && seq[i].1 {
+            let mut j = i;
+            while j > 0 && seq[j - 1].1 {
+                j -= 1;
+                known[j] = true;
+            }
+            let mut j = i;
+            while j + 1 < seq.len() && seq[j + 1].1 {
+                j += 1;
+                known[j] = true;
+            }
+        }
+    }
+    let mut keep = known.iter().map(|k| !k);
+    seq.retain(|_| keep.next().unwrap_or(true));
+
+    // Invented text (see the module notes).
     let mut k = 0;
     while k < seq.len() {
         if !seq[k].1 {
@@ -278,8 +365,14 @@ pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
         while e < seq.len() && seq[e].1 {
             e += 1;
         }
-        let (a, b) = (seq[k].0.start - 0.3, seq[e - 1].0.end + 0.3);
-        if e - k >= HALLUCINATION_MIN && !parakeet.iter().any(|x| a <= x.start && x.start <= b) {
+        let (start, end) = (seq[k].0.start, seq[e - 1].0.end);
+        let heard = |margin: f64| {
+            parakeet
+                .iter()
+                .any(|x| start - margin <= x.end && x.start <= end + margin)
+        };
+        let invented = (e - k >= HALLUCINATION_MIN && !heard(0.3)) || !heard(ISOLATED_S);
+        if invented {
             seq.drain(k..e);
         } else {
             k = e;
@@ -405,6 +498,43 @@ mod tests {
         assert!(t.starts_with("This is like data"), "{t}");
         assert!(t.contains("Especially for them"), "{t}");
         assert!(!t.contains("перегляд") && !t.contains("не може"), "{t}");
+        assert!(
+            m.iter()
+                .all(|w| w.source.as_deref() == Some(SOURCE_PARAKEET_EN))
+        );
+    }
+
+    /// From real calls: Whisper's lone phrases on a quiet microphone and
+    /// its subtitle credits go; Cyrillic for English speech never appears.
+    #[test]
+    fn lone_and_known_inventions_go() {
+        let parakeet = words("Добре, тоді давай так і зробимо.", 10.0);
+        let mut whisper = words("Дякую.", 2.0); // nothing heard near
+        whisper.extend(words("Добре, тоді давай так і зробимо.", 10.0));
+        whisper.extend(words("Субтитрувальниця Оля Шор", 12.2)); // right after speech
+        let t = text(&merge(&parakeet, &whisper));
+        assert_eq!(t, "Добре, тоді давай так і зробимо.");
+
+        // A short English reply: Whisper's "translation" paired with it goes.
+        let m = merge(&words("Yeah.", 5.0), &words("Дякую.", 5.0));
+        assert_eq!(text(&m), "Yeah.");
+        // A known invention over real speech goes; the speech stays.
+        let p = words("Добре, тоді до завтра", 1.9);
+        let w = words("Дякую за перегляд! Добре, тоді до завтра", 1.0);
+        assert_eq!(text(&merge(&p, &w)), "Добре, тоді до завтра");
+        let p = words("Дякую за перегляд, побачимось завтра", 1.0);
+        let w = words("Дякую за перегляд, побачимось завтра", 1.0);
+        assert_eq!(text(&merge(&p, &w)), "Дякую за перегляд, побачимось завтра");
+
+        // A region of an English call: all of it from Parakeet.
+        let mut p = words("Oh got it. Right. Okay, that makes sense.", 0.0);
+        p.extend(words("I don't think there is.", 4.0));
+        let w = words("О, \"віпсі\" я не думаю, I don't think there is.", 0.0);
+        let m = merge(&p, &w);
+        assert_eq!(
+            text(&m),
+            "Oh got it. Right. Okay, that makes sense. I don't think there is."
+        );
         assert!(
             m.iter()
                 .all(|w| w.source.as_deref() == Some(SOURCE_PARAKEET_EN))
