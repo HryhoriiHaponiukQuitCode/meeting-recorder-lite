@@ -147,6 +147,36 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+- **whisper.cpp 1.8.3 with ggml** (https://github.com/ggml-org/whisper.cpp),
+  MIT, © 2023-2024 The ggml authors. macOS only (the “Best” quality, on
+  the Metal graphics processor), built through the `whisper-rs` and
+  `whisper-rs-sys` Rust crates (https://codeberg.org/tazz4843/whisper-rs,
+  Unlicense, public domain).
+
+```
+MIT License
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### Speech models (downloaded on first use, not in the installer)
 
 - **NVIDIA Parakeet TDT 0.6B v3**
@@ -155,6 +185,11 @@ SOFTWARE.
   (https://creativecommons.org/licenses/by/4.0/). Used as the INT8 ONNX
   export `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` by the sherpa-onnx
   project (quantized and converted; no other changes).
+- **OpenAI Whisper large-v3-turbo** (https://github.com/openai/whisper),
+  MIT, © 2022 OpenAI. macOS “Best” quality only. Used as
+  `ggml-large-v3-turbo-q8_0.bin`, the ggml conversion with 8-bit
+  quantization from the whisper.cpp project
+  (https://huggingface.co/ggerganov/whisper.cpp; no other changes).
 - **Silero VAD** (https://github.com/snakers4/silero-vad), MIT,
   © 2020-present Silero Team, as `silero_vad.onnx` from the sherpa-onnx
   releases.
