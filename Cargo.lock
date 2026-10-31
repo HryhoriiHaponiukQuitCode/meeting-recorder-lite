@@ -2795,6 +2795,7 @@ dependencies = [
  "recorder-core",
  "recorder-transcribe",
  "rfd",
+ "serde_json",
  "tracing",
 ]
 
