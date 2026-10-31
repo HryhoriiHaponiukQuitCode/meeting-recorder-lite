@@ -46,8 +46,12 @@ const REFRESH_MINIMIZED: Duration = Duration::from_secs(1);
 const REFRESH_BACKGROUND: Duration = Duration::from_millis(250);
 /// How often transcript and model states are re-read from disk.
 const DISK_CHECK: Duration = Duration::from_secs(2);
-/// The left column (controls, list, settings); the transcript takes the rest.
-const LEFT_WIDTH: f32 = 384.0;
+/// The navigation rail, the section column (recording, list, settings);
+/// the transcript takes the rest.
+const RAIL_WIDTH: f32 = 84.0;
+const LEFT_WIDTH: f32 = 372.0;
+/// Recordings per page of the list (only these manifests are read).
+const PAGE: usize = 20;
 
 #[cfg(target_os = "macos")]
 const REVEAL: &str = "Show in Finder";
@@ -100,6 +104,8 @@ enum TranscriptAction {
     SetUp,
     /// Open the list of recordings.
     List,
+    /// Show this page of the list.
+    Page(usize),
 }
 
 /// Hidden developer options (`--smoke-test`, `--screenshot`, …).
@@ -163,6 +169,9 @@ struct App {
     last_transcript: TranscriptState,
     /// All recordings, for the list (refreshed while it is shown).
     sessions: Vec<SessionInfo>,
+    /// The list page shown and how many recordings there are.
+    page: usize,
+    sessions_total: usize,
     disk_checked: Instant,
     /// The recording whose transcript is on the right, and its state.
     reader: reader::Reader,
@@ -216,16 +225,15 @@ impl App {
             model_size: 0,
             last_transcript: TranscriptState::None,
             sessions: Vec::new(),
+            page: 0,
+            sessions_total: 0,
             disk_checked: Instant::now(),
             reader: reader::Reader::default(),
             shown: None,
             settings,
         };
-        app.reader.select(
-            dev.show
-                .clone()
-                .or_else(|| app.last.as_ref().map(|l| l.dir.clone())),
-        );
+        // Nothing is opened at start; the user picks a recording.
+        app.reader.select(dev.show.clone());
         if let Some(q) = dev.find {
             app.reader.query = q;
         }
@@ -465,7 +473,6 @@ impl App {
                 {
                     self.enqueue(dir.clone());
                 }
-                self.reader.select(Some(dir.clone()));
                 self.last = Some(LastRecording {
                     dir,
                     started: m.started_at_utc,
@@ -534,7 +541,15 @@ impl App {
         });
         // The list reads every manifest, so only while it is on screen.
         if self.view == View::Recordings {
-            self.sessions = sessions::list(&self.settings.recordings_dir());
+            let (page, total) =
+                sessions::page(&self.settings.recordings_dir(), self.page * PAGE, PAGE);
+            if page.is_empty() && self.page > 0 {
+                // The page emptied (recordings deleted): go back one.
+                self.page -= 1;
+                return self.check_disk();
+            }
+            self.sessions = page;
+            self.sessions_total = total;
         }
         self.reader.refresh();
         self.shown = self.reader.dir().and_then(sessions::info);
@@ -697,21 +712,51 @@ impl App {
 
     // ── Main screen ────────────────────────────────────────────────────
 
-    fn header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(32.0, 32.0)));
+    /// The navigation rail: the logo, Record and Recordings at the top,
+    /// Settings at the bottom (as Material's NavigationRail).
+    fn rail(&mut self, ui: &mut egui::Ui) {
+        let recording = self.recorder.is_some();
+        let mut go = None;
+        ui.vertical_centered(|ui| {
             ui.add_space(ui::S1);
-            ui.label(
-                RichText::new(APP_NAME)
-                    .font(FontId::new(18.0, ui::bold()))
-                    .color(ui::INK),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui::icon_button(ui, ui::Icon::Settings, "Settings").clicked() {
-                    self.view = View::Settings;
+            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(34.0, 34.0)))
+                .on_hover_text(APP_NAME);
+            ui.add_space(ui::S4 + ui::S2);
+            for (view, icon, label) in [
+                (View::Main, ui::Icon::Mic, "Record"),
+                (View::Recordings, ui::Icon::List, "Recordings"),
+            ] {
+                let badge = view == View::Main && recording;
+                if ui::rail_item(ui, icon, label, self.view == view, badge).clicked() {
+                    go = Some(view);
+                }
+                ui.add_space(ui::S1);
+            }
+            ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+                ui.add_space(ui::S2);
+                if ui::rail_item(
+                    ui,
+                    ui::Icon::Settings,
+                    "Settings",
+                    self.view == View::Settings,
+                    false,
+                )
+                .clicked()
+                {
+                    go = Some(View::Settings);
                 }
             });
         });
+        if let Some(v) = go {
+            self.go(v);
+        }
+    }
+
+    fn go(&mut self, view: View) {
+        self.view = view;
+        if view == View::Recordings {
+            self.check_disk();
+        }
     }
 
     /// The main card: status, the timer and the one action.
@@ -992,10 +1037,11 @@ impl App {
             }
             TranscriptAction::Reveal(dir) => paths::open_in_file_manager(&dir),
             TranscriptAction::SetUp => self.view = View::Settings,
-            TranscriptAction::List => {
-                self.view = View::Recordings;
+            TranscriptAction::Page(p) => {
+                self.page = p;
                 self.check_disk();
             }
+            TranscriptAction::List => self.go(View::Recordings),
         }
     }
 
@@ -1109,8 +1155,7 @@ impl App {
     }
 
     fn main_screen(&mut self, ui: &mut egui::Ui) {
-        self.header(ui);
-        ui.add_space(ui::S4);
+        section_title(ui, "Record", |_| {});
         self.permissions_card(ui);
         self.transport(ui);
         ui.add_space(ui::S3);
@@ -1127,28 +1172,17 @@ impl App {
 
     fn recordings_screen(&mut self, ui: &mut egui::Ui) {
         let mut action = None;
-        ui.horizontal(|ui| {
-            if ui::icon_button(ui, ui::Icon::Back, "Back").clicked() {
-                self.view = View::Main;
+        section_title(ui, "Recordings", |ui| {
+            if ui::icon_button(ui, ui::Icon::Folder, "Open the recordings folder").clicked() {
+                action = Some(TranscriptAction::Reveal(self.settings.recordings_dir()));
             }
-            ui.add_space(ui::S1);
-            ui.label(
-                RichText::new("Recordings")
-                    .font(FontId::new(18.0, ui::bold()))
-                    .color(ui::INK),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui::icon_button(ui, ui::Icon::Folder, "Open the recordings folder").clicked() {
-                    action = Some(TranscriptAction::Reveal(self.settings.recordings_dir()));
-                }
-            });
         });
-        ui.add_space(ui::S4);
         ui::card(ui, |ui| {
             let count = self.sessions.len();
+            let total = self.sessions_total;
             ui::card_header(ui, "All recordings", |ui| {
-                if count > 0 {
-                    ui.label(ui::muted(count.to_string()));
+                if total > 0 {
+                    ui.label(ui::muted(total.to_string()));
                 }
             });
             if count == 0 {
@@ -1163,15 +1197,33 @@ impl App {
                 ));
                 ui.add_space(ui::S2);
             }
+            ui.add_space(ui::S1);
             for (i, s) in self.sessions.iter().enumerate() {
                 if i > 0 {
-                    ui.add_space(ui::S2);
-                    ui::divider(ui);
-                    ui.add_space(ui::S2);
+                    ui.add_space(ui::S1);
                 }
                 if let Some(a) = self.session_row(ui, s) {
                     action = Some(a);
                 }
+            }
+            if total > PAGE {
+                // Pages: only the shown one is read from disk.
+                let first = self.page * PAGE + 1;
+                let last = first + count - 1;
+                ui.add_space(ui::S3);
+                ui::divider(ui);
+                ui.add_space(ui::S3);
+                ui.horizontal(|ui| {
+                    ui.label(ui::muted(format!("{first}–{last} of {total}")));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if last < total && ui::outline_small(ui, "Older", None).clicked() {
+                            action = Some(TranscriptAction::Page(self.page + 1));
+                        }
+                        if self.page > 0 && ui::outline_small(ui, "Newer", None).clicked() {
+                            action = Some(TranscriptAction::Page(self.page - 1));
+                        }
+                    });
+                });
             }
         });
         if let Some(a) = action {
@@ -1196,26 +1248,41 @@ impl App {
             (TranscriptState::Running, ..) => "interrupted",
             (TranscriptState::None, ..) => "no transcript",
         };
-        // The shown recording sits on a pale blue band (painted behind).
-        let band = ui.painter().add(egui::Shape::Noop);
+        // The whole row opens the transcript; the buttons on it are laid
+        // over it, so they still take their own clicks.
         let selected = self.reader.dir() == Some(s.dir.as_path());
-        let row = ui.horizontal(|ui| {
+        let progress = self.job_progress(&s.dir);
+        let height = if progress.is_some() { 64.0 } else { 52.0 };
+        let (rect, row) =
+            ui.allocate_exact_size(vec2(ui.available_width(), height), egui::Sense::click());
+        let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fill = if selected {
+            ui::BLUE.gamma_multiply(0.08)
+        } else if row.hovered() {
+            ui::HOVER
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect.expand2(vec2(ui::S2, 0.0)), 10, fill);
+        if row.clicked() {
+            action = Some(TranscriptAction::View(s.dir.clone()));
+        }
+        let mut inner = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        inner.horizontal(|ui| {
+            ui.set_min_height(52.0);
             ui.vertical(|ui| {
+                ui.add_space(ui::S2);
                 ui.spacing_mut().item_spacing.y = 2.0;
-                let title = ui
-                    .add(
-                        egui::Label::new(
-                            RichText::new(when(s.started))
-                                .font(FontId::new(14.0, ui::medium()))
-                                .color(if selected { ui::BLUE } else { ui::INK }),
-                        )
-                        .sense(egui::Sense::click()),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Show the transcript");
-                if title.clicked() {
-                    action = Some(TranscriptAction::View(s.dir.clone()));
-                }
+                ui.label(
+                    RichText::new(when(s.started))
+                        .font(FontId::new(14.0, ui::medium()))
+                        .color(if selected { ui::BLUE } else { ui::INK }),
+                );
                 ui.label(ui::muted(format!(
                     "{} · {state}",
                     duration_words(s.seconds)
@@ -1225,25 +1292,19 @@ impl App {
                 if !busy && !queued && ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
                     action = Some(TranscriptAction::Reveal(s.dir.clone()));
                 }
+                let done = matches!(s.transcript, TranscriptState::Done(_));
                 if s.recording {
                     ui::pill(ui, "Recording", ui::Tone::Red, true);
-                } else if s.transcribable() {
+                } else if s.transcribable() && (!done || busy || queued) {
                     action = self
                         .transcript_controls(ui, &s.dir, &s.transcript)
                         .or(action.take());
                 }
             });
         });
-        if let Some(p) = self.job_progress(&s.dir) {
-            ui.add_space(ui::S1);
-            ui::progress(ui, p);
-        }
-        if selected {
-            let r = row.response.rect.expand2(vec2(ui::S2, ui::S1 + 2.0));
-            ui.painter().set(
-                band,
-                egui::Shape::rect_filled(r, 10, ui::BLUE.gamma_multiply(0.07)),
-            );
+        if let Some(p) = progress {
+            inner.add_space(ui::S1);
+            ui::progress(&mut inner, p);
         }
         action
     }
@@ -1257,11 +1318,20 @@ impl App {
         ui::card_frame().show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             let Some(info) = self.shown.clone() else {
-                empty_state(
-                    ui,
-                    "No recording yet",
-                    "Record a call; its transcript appears here, who said what and when.",
-                );
+                if self.last.is_some() {
+                    empty_state(
+                        ui,
+                        "Choose a recording",
+                        "Pick one in Recordings, or press View under the last recording, \
+                         to read its transcript here.",
+                    );
+                } else {
+                    empty_state(
+                        ui,
+                        "No recording yet",
+                        "Record a call; its transcript appears here, who said what and when.",
+                    );
+                }
                 return;
             };
             // Title row: when, how long, and what can be done with it.
@@ -1376,18 +1446,7 @@ impl App {
     // ── Settings screen ────────────────────────────────────────────────
 
     fn settings_screen(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui::icon_button(ui, ui::Icon::Back, "Back").clicked() {
-                self.view = View::Main;
-            }
-            ui.add_space(ui::S1);
-            ui.label(
-                RichText::new("Settings")
-                    .font(FontId::new(18.0, ui::bold()))
-                    .color(ui::INK),
-            );
-        });
-        ui.add_space(ui::S4);
+        section_title(ui, "Settings", |_| {});
 
         ui::card(ui, |ui| self.echo_settings(ui));
         ui.add_space(ui::S3);
@@ -1783,12 +1842,23 @@ impl eframe::App for App {
         }
 
         ui::backdrop(ctx);
+        egui::SidePanel::left("rail")
+            .exact_width(RAIL_WIDTH)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().inner_margin(egui::Margin {
+                left: 6,
+                right: 0,
+                top: 16,
+                bottom: 14,
+            }))
+            .show(ctx, |ui| self.rail(ui));
         egui::SidePanel::left("controls")
             .exact_width(LEFT_WIDTH)
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin {
-                left: 14,
+                left: 2,
                 right: 0,
                 top: 14,
                 bottom: 8,
@@ -1856,6 +1926,20 @@ impl Drop for App {
         self.stop();
         self.collect_saved(true);
     }
+}
+
+/// The title of the section column, with something on the right.
+fn section_title(ui: &mut egui::Ui, title: &str, right: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(36.0);
+        ui.label(
+            RichText::new(title)
+                .font(FontId::new(20.0, ui::bold()))
+                .color(ui::INK),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), right);
+    });
+    ui.add_space(ui::S4);
 }
 
 /// A quiet centred note where the transcript would be.

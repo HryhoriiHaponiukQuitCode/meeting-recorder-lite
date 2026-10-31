@@ -14,7 +14,7 @@ pub const CARD: Color32 = Color32::WHITE;
 pub const HAIRLINE: Color32 = Color32::from_rgb(0xe8, 0xec, 0xf2);
 const BORDER: Color32 = Color32::from_rgb(0xdc, 0xe2, 0xea);
 const BORDER_HOVER: Color32 = Color32::from_rgb(0xc4, 0xcd, 0xd9);
-const HOVER: Color32 = Color32::from_rgb(0xf7, 0xf9, 0xfc);
+pub const HOVER: Color32 = Color32::from_rgb(0xf7, 0xf9, 0xfc);
 const TRACK: Color32 = Color32::from_rgb(0xeb, 0xef, 0xf4);
 pub const INK: Color32 = Color32::from_rgb(0x14, 0x1c, 0x2b);
 pub const INK_SECONDARY: Color32 = Color32::from_rgb(0x4b, 0x56, 0x68);
@@ -301,10 +301,11 @@ pub enum Icon {
     Wave,
     Stop,
     Arrow,
-    Back,
     Close,
     Settings,
     Folder,
+    /// A list of recordings: lines with a dot before each.
+    List,
     Mic,
     Speaker,
     Alert,
@@ -350,11 +351,6 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
             line(vec2(5.5, 0.0), vec2(1.5, -4.0));
             line(vec2(5.5, 0.0), vec2(1.5, 4.0));
         }
-        Icon::Back => {
-            line(vec2(-6.0, 0.0), vec2(6.0, 0.0));
-            line(vec2(-6.0, 0.0), vec2(-1.5, -4.5));
-            line(vec2(-6.0, 0.0), vec2(-1.5, 4.5));
-        }
         Icon::Close => {
             line(vec2(-4.5, -4.5), vec2(4.5, 4.5));
             line(vec2(-4.5, 4.5), vec2(4.5, -4.5));
@@ -364,6 +360,12 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
             for (dy, knob) in [(-5.0, 2.5), (0.0, -3.0), (5.0, 1.0)] {
                 line(vec2(-7.0, dy), vec2(7.0, dy));
                 painter.circle_filled(c + vec2(knob, dy), 2.4, color);
+            }
+        }
+        Icon::List => {
+            for dy in [-5.0, 0.0, 5.0] {
+                painter.circle_filled(c + vec2(-6.0, dy), 1.6, color);
+                line(vec2(-2.5, dy), vec2(7.0, dy));
             }
         }
         Icon::Folder => {
@@ -593,6 +595,47 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
     response
         .on_hover_text(tooltip)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A navigation rail entry (as Material's NavigationRail): the icon on a
+/// pill that fills with a blue tint when selected, the label below.
+pub fn rail_item(ui: &mut Ui, icon: Icon, label: &str, selected: bool, badge: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::click());
+    let hovered = response.hovered();
+    let pill = Rect::from_center_size(pos2(rect.center().x, rect.top() + 18.0), vec2(52.0, 32.0));
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(pill, 16, BLUE.gamma_multiply(0.13));
+    } else if hovered {
+        painter.rect_filled(pill, 16, TRACK);
+    }
+    let ink = if selected {
+        BLUE
+    } else if hovered {
+        INK
+    } else {
+        INK_SECONDARY
+    };
+    draw_icon(painter, icon, pill.center(), ink);
+    if badge {
+        // A red dot: something is going on there (recording).
+        let at = pill.right_top() + vec2(-12.0, 7.0);
+        painter.circle_filled(at, 4.5, CARD);
+        painter.circle_filled(at, 3.5, RED);
+    }
+    let font = if selected {
+        FontId::new(12.0, medium())
+    } else {
+        FontId::proportional(12.0)
+    };
+    painter.text(
+        pos2(rect.center().x, pill.bottom() + 12.0),
+        Align2::CENTER_CENTER,
+        label,
+        font,
+        if selected { INK } else { INK_SECONDARY },
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A small round close button for dismissible cards.
