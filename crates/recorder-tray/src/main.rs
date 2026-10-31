@@ -1,10 +1,13 @@
-//! Meeting Recorder window app: a transport button, timer, channel meters,
-//! warnings, the last recording and a settings screen. All recording work
-//! happens in `recorder_app::Recorder` on its own thread; this file is UI.
+//! Meeting Recorder window app. On the left: a transport button, timer,
+//! channel meters, warnings, the last recording, the list of recordings and
+//! the settings. On the right: the transcript of the selected recording
+//! (`reader`). All recording work happens in `recorder_app::Recorder` on
+//! its own thread; this file is UI.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod assets;
+mod reader;
 mod ui;
 
 use std::collections::VecDeque;
@@ -43,6 +46,8 @@ const REFRESH_MINIMIZED: Duration = Duration::from_secs(1);
 const REFRESH_BACKGROUND: Duration = Duration::from_millis(250);
 /// How often transcript and model states are re-read from disk.
 const DISK_CHECK: Duration = Duration::from_secs(2);
+/// The left column (controls, list, settings); the transcript takes the rest.
+const LEFT_WIDTH: f32 = 384.0;
 
 #[cfg(target_os = "macos")]
 const REVEAL: &str = "Show in Finder";
@@ -89,6 +94,8 @@ enum TranscriptAction {
     /// Take a waiting recording off the queue.
     Unqueue(PathBuf),
     Open(PathBuf),
+    /// Show the transcript of this recording on the right.
+    View(PathBuf),
     Reveal(PathBuf),
     SetUp,
     /// Open the list of recordings.
@@ -107,10 +114,15 @@ struct DevOptions {
     screenshot_at: Option<f32>,
     view: Option<View>,
     window_height: Option<f32>,
+    window_width: Option<f32>,
     /// `--scroll 600`: start scrolled down (screenshots of lower cards).
     scroll: Option<f32>,
     /// `--transcribe`: transcribe the last recording at launch.
     transcribe: bool,
+    /// `--show <session folder>` and `--find <text>`: what the transcript
+    /// pane shows (screenshots).
+    show: Option<PathBuf>,
+    find: Option<String>,
 }
 
 struct App {
@@ -152,6 +164,9 @@ struct App {
     /// All recordings, for the list (refreshed while it is shown).
     sessions: Vec<SessionInfo>,
     disk_checked: Instant,
+    /// The recording whose transcript is on the right, and its state.
+    reader: reader::Reader,
+    shown: Option<SessionInfo>,
 }
 
 impl App {
@@ -202,8 +217,18 @@ impl App {
             last_transcript: TranscriptState::None,
             sessions: Vec::new(),
             disk_checked: Instant::now(),
+            reader: reader::Reader::default(),
+            shown: None,
             settings,
         };
+        app.reader.select(
+            dev.show
+                .clone()
+                .or_else(|| app.last.as_ref().map(|l| l.dir.clone())),
+        );
+        if let Some(q) = dev.find {
+            app.reader.query = q;
+        }
         app.check_disk();
         // First launch: ask for everything right away, so the system prompts
         // appear now and not in the middle of a call. Screenshots run
@@ -440,6 +465,7 @@ impl App {
                 {
                     self.enqueue(dir.clone());
                 }
+                self.reader.select(Some(dir.clone()));
                 self.last = Some(LastRecording {
                     dir,
                     started: m.started_at_utc,
@@ -510,6 +536,8 @@ impl App {
         if self.view == View::Recordings {
             self.sessions = sessions::list(&self.settings.recordings_dir());
         }
+        self.reader.refresh();
+        self.shown = self.reader.dir().and_then(sessions::info);
         self.disk_checked = Instant::now();
     }
 
@@ -958,6 +986,10 @@ impl App {
             }
             TranscriptAction::Unqueue(dir) => self.queue.retain(|d| *d != dir),
             TranscriptAction::Open(path) => paths::open_file(&path),
+            TranscriptAction::View(dir) => {
+                self.reader.select(Some(dir));
+                self.check_disk();
+            }
             TranscriptAction::Reveal(dir) => paths::open_in_file_manager(&dir),
             TranscriptAction::SetUp => self.view = View::Settings,
             TranscriptAction::List => {
@@ -1008,9 +1040,11 @@ impl App {
                 action = Some(TranscriptAction::Unqueue(dir.to_path_buf()));
             }
             ui::pill(ui, "Queued", ui::Tone::Grey, false);
-        } else if let TranscriptState::Done(path) = state {
-            if ui::outline_small(ui, "Open", Some((ui::Icon::Arrow, ui::BLUE))).clicked() {
-                action = Some(TranscriptAction::Open(path.clone()));
+        } else if let TranscriptState::Done(_) = state {
+            if self.reader.dir() == Some(dir) {
+                ui::pill(ui, "Shown", ui::Tone::Blue, false);
+            } else if ui::outline_small(ui, "View", Some((ui::Icon::Arrow, ui::BLUE))).clicked() {
+                action = Some(TranscriptAction::View(dir.to_path_buf()));
             }
         } else if self.model_status != ModelStatus::Ready {
             if ui::outline_small(ui, "Set up", None).clicked() {
@@ -1063,7 +1097,7 @@ impl App {
         } else {
             match &self.last_transcript {
                 TranscriptState::Done(_) => {
-                    "Who said what, with times: Me and Others. Also as subtitles and JSON.".into()
+                    "Who said what, with times. Also saved as text, subtitles and JSON.".into()
                 }
                 TranscriptState::Failed(e) => format!("Failed: {e}"),
                 _ => "Turns speech into text on this computer; audio never leaves it.".into(),
@@ -1162,14 +1196,26 @@ impl App {
             (TranscriptState::Running, ..) => "interrupted",
             (TranscriptState::None, ..) => "no transcript",
         };
-        ui.horizontal(|ui| {
+        // The shown recording sits on a pale blue band (painted behind).
+        let band = ui.painter().add(egui::Shape::Noop);
+        let selected = self.reader.dir() == Some(s.dir.as_path());
+        let row = ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(
-                    RichText::new(when(s.started))
-                        .font(FontId::new(14.0, ui::medium()))
-                        .color(ui::INK),
-                );
+                let title = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(when(s.started))
+                                .font(FontId::new(14.0, ui::medium()))
+                                .color(if selected { ui::BLUE } else { ui::INK }),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Show the transcript");
+                if title.clicked() {
+                    action = Some(TranscriptAction::View(s.dir.clone()));
+                }
                 ui.label(ui::muted(format!(
                     "{} · {state}",
                     duration_words(s.seconds)
@@ -1192,7 +1238,139 @@ impl App {
             ui.add_space(ui::S1);
             ui::progress(ui, p);
         }
+        if selected {
+            let r = row.response.rect.expand2(vec2(ui::S2, ui::S1 + 2.0));
+            ui.painter().set(
+                band,
+                egui::Shape::rect_filled(r, 10, ui::BLUE.gamma_multiply(0.07)),
+            );
+        }
         action
+    }
+
+    // ── Transcript pane ────────────────────────────────────────────────
+
+    /// The right side: the transcript of the selected recording, or what
+    /// stands in for it (transcribing, not yet, failed, nothing selected).
+    fn transcript_pane(&mut self, ui: &mut egui::Ui) {
+        let mut action = None;
+        ui::card_frame().show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            let Some(info) = self.shown.clone() else {
+                empty_state(
+                    ui,
+                    "No recording yet",
+                    "Record a call; its transcript appears here, who said what and when.",
+                );
+                return;
+            };
+            // Title row: when, how long, and what can be done with it.
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        RichText::new(when(info.started))
+                            .font(FontId::new(19.0, ui::bold()))
+                            .color(ui::INK),
+                    );
+                    ui.label(ui::muted(duration_words(info.seconds)));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
+                        action = Some(TranscriptAction::Reveal(info.dir.clone()));
+                    }
+                    let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
+                        || self.queue.contains(&info.dir);
+                    match (&info.transcript, busy) {
+                        (TranscriptState::Done(txt), false) => {
+                            if ui::outline_small(ui, "Open file", None)
+                                .on_hover_text("transcript.txt in your text editor")
+                                .clicked()
+                            {
+                                action = Some(TranscriptAction::Open(txt.clone()));
+                            }
+                            if ui::outline_small(ui, "Copy all", None).clicked()
+                                && let Ok(text) = std::fs::read_to_string(txt)
+                            {
+                                ui.ctx().copy_text(text);
+                                self.message = Some(Message {
+                                    text: "The transcript is copied.".into(),
+                                    problem: false,
+                                });
+                            }
+                        }
+                        _ if info.transcribable() => {
+                            if let Some(a) =
+                                self.transcript_controls(ui, &info.dir, &info.transcript)
+                            {
+                                action = Some(a);
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            });
+            ui.add_space(ui::S3);
+            let job = self.job_progress(&info.dir);
+            let queued = self.queue.contains(&info.dir);
+            match (&self.reader.transcript, job) {
+                (_, Some(p)) => {
+                    ui::progress(ui, p);
+                    ui.add_space(ui::S2);
+                    ui.label(ui::muted(
+                        "Transcribing in the background at low priority. The text appears here \
+                         when it is ready.",
+                    ));
+                }
+                (Some(Ok(t)), None) if matches!(info.transcript, TranscriptState::Done(_)) => {
+                    reader::people(ui, t);
+                    ui.add_space(ui::S2);
+                    reader::search(ui, &mut self.reader.query, t);
+                    ui.add_space(ui::S2);
+                    ui::divider(ui);
+                    reader::body(ui, t, &self.reader.query);
+                }
+                (Some(Err(e)), None) => {
+                    empty_state(ui, "The transcript cannot be read", e);
+                }
+                _ if info.recording => {
+                    empty_state(ui, "Recording now", "The transcript follows when it ends.");
+                }
+                _ if info.seconds == 0 => {
+                    empty_state(ui, "No audio", "Nothing was recorded in this session.");
+                }
+                _ if info.audio_missing => empty_state(
+                    ui,
+                    "The audio is missing",
+                    "The audio files of this recording were deleted or moved.",
+                ),
+                _ if queued => empty_state(
+                    ui,
+                    "Waiting to be transcribed",
+                    "It starts when the current transcription or recording ends.",
+                ),
+                _ => match &info.transcript {
+                    TranscriptState::Failed(e) => empty_state(
+                        ui,
+                        "Transcription failed",
+                        &format!("{e}. Try again above."),
+                    ),
+                    _ if self.model_status != ModelStatus::Ready => empty_state(
+                        ui,
+                        "No transcript yet",
+                        "Download the speech models once in Settings, then press Transcribe.",
+                    ),
+                    _ => empty_state(
+                        ui,
+                        "No transcript yet",
+                        "Press Transcribe above. It runs on this computer; audio never leaves it.",
+                    ),
+                },
+            }
+        });
+        if let Some(a) = action {
+            self.apply(a);
+        }
     }
 
     // ── Settings screen ────────────────────────────────────────────────
@@ -1605,10 +1783,13 @@ impl eframe::App for App {
         }
 
         ui::backdrop(ctx);
-        egui::CentralPanel::default()
+        egui::SidePanel::left("controls")
+            .exact_width(LEFT_WIDTH)
+            .resizable(false)
+            .show_separator_line(false)
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 left: 14,
-                right: 6,
+                right: 0,
                 top: 14,
                 bottom: 8,
             }))
@@ -1634,6 +1815,14 @@ impl eframe::App for App {
                         });
                 });
             });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin {
+                left: 6,
+                right: 20,
+                top: 18,
+                bottom: 20,
+            }))
+            .show(ctx, |ui| self.transcript_pane(ui));
         self.consent_modal(ctx);
         self.close_modal(ctx);
 
@@ -1667,6 +1856,20 @@ impl Drop for App {
         self.stop();
         self.collect_saved(true);
     }
+}
+
+/// A quiet centred note where the transcript would be.
+fn empty_state(ui: &mut egui::Ui, title: &str, text: &str) {
+    ui.add_space((ui.available_height() * 0.3).max(ui::S4));
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(title)
+                .font(FontId::new(15.5, ui::medium()))
+                .color(ui::INK_SECONDARY),
+        );
+        ui.add_space(ui::S1);
+        ui.label(ui::muted(text));
+    });
 }
 
 fn modal_title(ui: &mut egui::Ui, text: &str) {
@@ -1791,8 +1994,11 @@ fn dev_options() -> DevOptions {
             _ => None,
         }),
         window_height: value("--window-height").and_then(|v| v.parse().ok()),
+        window_width: value("--window-width").and_then(|v| v.parse().ok()),
         scroll: value("--scroll").and_then(|v| v.parse().ok()),
         transcribe: args.iter().any(|a| a == "--transcribe"),
+        show: value("--show").map(PathBuf::from),
+        find: value("--find"),
     }
 }
 
@@ -1809,8 +2015,11 @@ fn main() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
-            .with_inner_size([380.0, dev.window_height.unwrap_or(700.0)])
-            .with_min_inner_size([340.0, 560.0])
+            .with_inner_size([
+                dev.window_width.unwrap_or(1120.0),
+                dev.window_height.unwrap_or(760.0),
+            ])
+            .with_min_inner_size([860.0, 600.0])
             .with_icon(Arc::new(egui::IconData {
                 rgba,
                 width,

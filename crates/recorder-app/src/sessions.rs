@@ -59,6 +59,12 @@ pub fn list(root: &Path) -> Vec<SessionInfo> {
     out
 }
 
+/// One recording, from its folder.
+pub fn info(dir: &Path) -> Option<SessionInfo> {
+    let m = Manifest::load(dir).ok()?;
+    Some(SessionInfo::from_manifest(dir.to_path_buf(), &m))
+}
+
 /// The newest closed recording with audio.
 pub fn latest(root: &Path) -> Option<SessionInfo> {
     list(root).into_iter().find(SessionInfo::transcribable)
