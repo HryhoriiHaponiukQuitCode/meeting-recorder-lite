@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike, Local, Utc};
 use eframe::egui::{self, Align, FontId, Layout, RichText, TextureHandle, ViewportCommand, vec2};
 use recorder_app::permissions::{self, Access, Permission};
 use recorder_app::sessions::{self, SessionInfo};
@@ -50,8 +50,11 @@ const DISK_CHECK: Duration = Duration::from_secs(2);
 /// the transcript takes the rest.
 const RAIL_WIDTH: f32 = 84.0;
 const LEFT_WIDTH: f32 = 372.0;
-/// Recordings per page of the list (only these manifests are read).
-const PAGE: usize = 20;
+/// The list reads this many recordings at first and this many more each
+/// time it is scrolled to the end (only these manifests are read).
+const LOAD_STEP: usize = 50;
+/// The widest the Record and Settings sections get.
+const SECTION_MAX: f32 = 620.0;
 
 #[cfg(target_os = "macos")]
 const REVEAL: &str = "Show in Finder";
@@ -104,8 +107,8 @@ enum TranscriptAction {
     SetUp,
     /// Open the list of recordings.
     List,
-    /// Show this page of the list.
-    Page(usize),
+    /// Read more recordings into the list (scrolled to its end).
+    More,
 }
 
 /// Hidden developer options (`--smoke-test`, `--screenshot`, …).
@@ -169,8 +172,8 @@ struct App {
     last_transcript: TranscriptState,
     /// All recordings, for the list (refreshed while it is shown).
     sessions: Vec<SessionInfo>,
-    /// The list page shown and how many recordings there are.
-    page: usize,
+    /// How many recordings the list has read, and how many there are.
+    loaded: usize,
     sessions_total: usize,
     disk_checked: Instant,
     /// The recording whose transcript is on the right, and its state.
@@ -225,7 +228,7 @@ impl App {
             model_size: 0,
             last_transcript: TranscriptState::None,
             sessions: Vec::new(),
-            page: 0,
+            loaded: LOAD_STEP,
             sessions_total: 0,
             disk_checked: Instant::now(),
             reader: reader::Reader::default(),
@@ -541,15 +544,16 @@ impl App {
         });
         // The list reads every manifest, so only while it is on screen.
         if self.view == View::Recordings {
-            let (page, total) =
-                sessions::page(&self.settings.recordings_dir(), self.page * PAGE, PAGE);
-            if page.is_empty() && self.page > 0 {
-                // The page emptied (recordings deleted): go back one.
-                self.page -= 1;
-                return self.check_disk();
-            }
-            self.sessions = page;
+            let (list, total) = sessions::page(&self.settings.recordings_dir(), 0, self.loaded);
+            self.sessions = list;
             self.sessions_total = total;
+            // Opening the list shows a transcript: the one chosen before, or
+            // the newest.
+            if self.reader.dir().is_none()
+                && let Some(first) = self.sessions.first()
+            {
+                self.reader.select(Some(first.dir.clone()));
+            }
         }
         self.reader.refresh();
         self.shown = self.reader.dir().and_then(sessions::info);
@@ -1033,12 +1037,12 @@ impl App {
             TranscriptAction::Open(path) => paths::open_file(&path),
             TranscriptAction::View(dir) => {
                 self.reader.select(Some(dir));
-                self.check_disk();
+                self.go(View::Recordings);
             }
             TranscriptAction::Reveal(dir) => paths::open_in_file_manager(&dir),
             TranscriptAction::SetUp => self.view = View::Settings,
-            TranscriptAction::Page(p) => {
-                self.page = p;
+            TranscriptAction::More => {
+                self.loaded += LOAD_STEP;
                 self.check_disk();
             }
             TranscriptAction::List => self.go(View::Recordings),
@@ -1087,9 +1091,7 @@ impl App {
             }
             ui::pill(ui, "Queued", ui::Tone::Grey, false);
         } else if let TranscriptState::Done(_) = state {
-            if self.reader.dir() == Some(dir) {
-                ui::pill(ui, "Shown", ui::Tone::Blue, false);
-            } else if ui::outline_small(ui, "View", Some((ui::Icon::Arrow, ui::BLUE))).clicked() {
+            if ui::outline_small(ui, "View", Some((ui::Icon::Arrow, ui::BLUE))).clicked() {
                 action = Some(TranscriptAction::View(dir.to_path_buf()));
             }
         } else if self.model_status != ModelStatus::Ready {
@@ -1197,33 +1199,29 @@ impl App {
                 ));
                 ui.add_space(ui::S2);
             }
-            ui.add_space(ui::S1);
-            for (i, s) in self.sessions.iter().enumerate() {
-                if i > 0 {
+            // One list, grouped by day; more is read when the end shows.
+            let mut day = String::new();
+            let mut last_rect = None;
+            for s in &self.sessions {
+                let d = day_label(s.started);
+                if d != day {
+                    ui.add_space(ui::S3);
+                    ui.label(ui::caption(&d));
                     ui.add_space(ui::S1);
+                    day = d;
                 }
-                if let Some(a) = self.session_row(ui, s) {
-                    action = Some(a);
+                let (a, rect) = self.session_row(ui, s);
+                if a.is_some() {
+                    action = a;
                 }
+                last_rect = Some(rect);
             }
-            if total > PAGE {
-                // Pages: only the shown one is read from disk.
-                let first = self.page * PAGE + 1;
-                let last = first + count - 1;
+            if count < total {
                 ui.add_space(ui::S3);
-                ui::divider(ui);
-                ui.add_space(ui::S3);
-                ui.horizontal(|ui| {
-                    ui.label(ui::muted(format!("{first}–{last} of {total}")));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if last < total && ui::outline_small(ui, "Older", None).clicked() {
-                            action = Some(TranscriptAction::Page(self.page + 1));
-                        }
-                        if self.page > 0 && ui::outline_small(ui, "Newer", None).clicked() {
-                            action = Some(TranscriptAction::Page(self.page - 1));
-                        }
-                    });
-                });
+                ui.label(ui::muted("Loading older recordings…"));
+                if last_rect.is_some_and(|r| ui.is_rect_visible(r)) && action.is_none() {
+                    action = Some(TranscriptAction::More);
+                }
             }
         });
         if let Some(a) = action {
@@ -1232,7 +1230,11 @@ impl App {
     }
 
     /// One recording: when, how long, transcript state and its button.
-    fn session_row(&self, ui: &mut egui::Ui, s: &SessionInfo) -> Option<TranscriptAction> {
+    fn session_row(
+        &self,
+        ui: &mut egui::Ui,
+        s: &SessionInfo,
+    ) -> (Option<TranscriptAction>, egui::Rect) {
         let mut action = None;
         let busy = self.job.as_ref().is_some_and(|j| j.session() == s.dir);
         let queued = self.queue.contains(&s.dir);
@@ -1278,8 +1280,9 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(ui::S2);
                 ui.spacing_mut().item_spacing.y = 2.0;
+                // The day is in the group heading above.
                 ui.label(
-                    RichText::new(when(s.started))
+                    RichText::new(s.started.with_timezone(&Local).format("%H:%M").to_string())
                         .font(FontId::new(14.0, ui::medium()))
                         .color(if selected { ui::BLUE } else { ui::INK }),
                 );
@@ -1289,7 +1292,14 @@ impl App {
                 )));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if !busy && !queued && ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
+                // The folder button only on the row under the pointer or the
+                // shown one, so the list stays quiet.
+                let near = ui.rect_contains_pointer(rect) || selected;
+                if near
+                    && !busy
+                    && !queued
+                    && ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked()
+                {
                     action = Some(TranscriptAction::Reveal(s.dir.clone()));
                 }
                 let done = matches!(s.transcript, TranscriptState::Done(_));
@@ -1306,7 +1316,43 @@ impl App {
             inner.add_space(ui::S1);
             ui::progress(&mut inner, p);
         }
-        action
+        (action, rect)
+    }
+
+    /// The section (Record, Recordings or Settings) in a scroll area,
+    /// centred when there is room to spare.
+    fn section(&mut self, ui: &mut egui::Ui) {
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(("section", self.view as u8))
+            .auto_shrink([false, false]);
+        if let Some(y) = self.scroll.take() {
+            area = area.vertical_scroll_offset(y);
+        }
+        area.show(ui, |ui| {
+            // A column no wider than SECTION_MAX, in the middle.
+            let full = ui.available_rect_before_wrap();
+            let width = full.width().min(SECTION_MAX + 16.0);
+            let column = egui::Rect::from_min_size(
+                egui::pos2(full.center().x - width / 2.0, full.top()),
+                vec2(width, full.height()),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+                // Room for the card shadows, and on the right for the
+                // floating scroll bar.
+                egui::Frame::new()
+                    .inner_margin(egui::Margin {
+                        left: 6,
+                        right: 10,
+                        top: 4,
+                        bottom: 12,
+                    })
+                    .show(ui, |ui| match self.view {
+                        View::Main => self.main_screen(ui),
+                        View::Settings => self.settings_screen(ui),
+                        View::Recordings => self.recordings_screen(ui),
+                    });
+            });
+        });
     }
 
     // ── Transcript pane ────────────────────────────────────────────────
@@ -1322,8 +1368,7 @@ impl App {
                     empty_state(
                         ui,
                         "Choose a recording",
-                        "Pick one in Recordings, or press View under the last recording, \
-                         to read its transcript here.",
+                        "Pick a recording on the left to read its transcript here.",
                     );
                 } else {
                     empty_state(
@@ -1853,46 +1898,39 @@ impl eframe::App for App {
                 bottom: 14,
             }))
             .show(ctx, |ui| self.rail(ui));
-        egui::SidePanel::left("controls")
-            .exact_width(LEFT_WIDTH)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(egui::Frame::new().inner_margin(egui::Margin {
-                left: 2,
-                right: 0,
-                top: 14,
-                bottom: 8,
-            }))
-            .show(ctx, |ui| {
-                let mut area = egui::ScrollArea::vertical();
-                if let Some(y) = self.scroll.take() {
-                    area = area.vertical_scroll_offset(y);
-                }
-                area.show(ui, |ui| {
-                    // Room for the card shadows; the wider right side holds
-                    // the floating scroll bar.
-                    egui::Frame::new()
-                        .inner_margin(egui::Margin {
-                            left: 6,
-                            right: 10,
-                            top: 4,
-                            bottom: 12,
-                        })
-                        .show(ui, |ui| match self.view {
-                            View::Main => self.main_screen(ui),
-                            View::Settings => self.settings_screen(ui),
-                            View::Recordings => self.recordings_screen(ui),
-                        });
-                });
-            });
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().inner_margin(egui::Margin {
-                left: 6,
-                right: 20,
-                top: 18,
-                bottom: 20,
-            }))
-            .show(ctx, |ui| self.transcript_pane(ui));
+        if self.view == View::Recordings {
+            // The list on the left, the transcript of the chosen recording.
+            egui::SidePanel::left("controls")
+                .exact_width(LEFT_WIDTH)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    left: 2,
+                    right: 0,
+                    top: 14,
+                    bottom: 8,
+                }))
+                .show(ctx, |ui| self.section(ui));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    left: 6,
+                    right: 20,
+                    top: 18,
+                    bottom: 20,
+                }))
+                .show(ctx, |ui| self.transcript_pane(ui));
+        } else {
+            // Record and Settings: one column, centred, no wider than
+            // SECTION_MAX.
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    left: 2,
+                    right: 6,
+                    top: 14,
+                    bottom: 8,
+                }))
+                .show(ctx, |ui| self.section(ui));
+        }
         self.consent_modal(ctx);
         self.close_modal(ctx);
 
@@ -2006,6 +2044,23 @@ fn when(t: DateTime<Utc>) -> String {
         local.format("%-d %b").to_string()
     };
     format!("{prefix} at {}", local.format("%H:%M"))
+}
+
+/// The list's day headings: "Today", "Yesterday", "Monday, 27 Oct",
+/// "27 Oct 2025" for other years.
+fn day_label(t: DateTime<Utc>) -> String {
+    let local = t.with_timezone(&Local);
+    let today = Local::now().date_naive();
+    let day = local.date_naive();
+    if day == today {
+        "Today".into()
+    } else if today.pred_opt() == Some(day) {
+        "Yesterday".into()
+    } else if day.year() == today.year() {
+        local.format("%A, %-d %b").to_string()
+    } else {
+        local.format("%-d %b %Y").to_string()
+    }
 }
 
 /// "7 s", "12 min 5 s", "1 h 2 min".
