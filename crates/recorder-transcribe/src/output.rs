@@ -167,49 +167,10 @@ fn srt_time(t: f64) -> String {
     )
 }
 
+/// The dialogue as plain text, one turn per line: `[hh:mm:ss] Name: text`.
+/// Nothing else: what the transcript was made with is in the JSON.
 pub fn txt(doc: &Document) -> String {
-    let mut s = if doc.participants.is_empty() {
-        format!(
-            "Transcript of a {} recording. Me = microphone, Others = system audio.\n",
-            clock(doc.audio_s)
-        )
-    } else {
-        let list = |sp: crate::Speaker| {
-            let l: Vec<&str> = doc
-                .participants
-                .iter()
-                .filter(|p| p.speaker == sp)
-                .map(|p| p.label.as_str())
-                .collect();
-            if l.is_empty() {
-                "-".to_string()
-            } else {
-                l.join(", ")
-            }
-        };
-        let mut h = format!(
-            "Transcript of a {} recording. Microphone: {}. System audio: {}.\n",
-            clock(doc.audio_s),
-            list(crate::Speaker::Me),
-            list(crate::Speaker::Others)
-        );
-        if doc.others_voices > 1 {
-            h.push_str(
-                "Voices on the system audio are told apart by sound; short replies may land on \
-                 the wrong one.\n",
-            );
-        }
-        if doc.participants.iter().any(|p| p.name.is_some()) {
-            h.push_str(
-                "Names come from how people address each other in the call and may be wrong.\n",
-            );
-        }
-        h
-    };
-    s.push_str(&format!(
-        "Times are positions in the recording. Transcribed locally with {} ({}).\n\n",
-        doc.model, doc.engine
-    ));
+    let mut s = String::new();
     let t: Vec<Turn> = turns(&doc.utterances);
     if t.is_empty() {
         s.push_str("(no speech found)\n");
@@ -319,7 +280,7 @@ mod tests {
     fn text_and_subtitles_leave_echo_out() {
         let d = doc();
         let t = txt(&d);
-        assert!(t.starts_with("Transcript of a 01:02:05 recording"));
+        assert!(t.starts_with("[00:00:01] Others: Привіт.\n"), "{t}");
         assert!(t.contains("[00:00:01] Others: Привіт.\n"));
         assert!(t.contains("[01:01:01] Me: Добрий день.\n"));
         assert!(!t.contains("привіт\n"));
@@ -360,17 +321,16 @@ mod tests {
             },
         ];
         let t = txt(&d);
-        assert!(
-            t.contains("Microphone: Participant 2. System audio: Participant 1, Катя.\n"),
-            "{t}"
-        );
         assert!(t.contains("[00:00:01] Participant 1: Привіт.\n"), "{t}");
         assert!(t.contains("] Катя: Привіт.\n"), "{t}");
         assert!(
             t.contains("[01:01:01] Participant 2: Добрий день.\n"),
             "{t}"
         );
-        assert!(t.contains("Names come from how people address each other"));
+        assert!(
+            !t.contains("Transcribed") && !t.contains("Names come from"),
+            "{t}"
+        );
         assert!(srt(&d).contains("Катя: Привіт."));
     }
 

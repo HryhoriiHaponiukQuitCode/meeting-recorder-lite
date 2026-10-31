@@ -71,6 +71,10 @@ enum Cmd {
         #[command(flatten)]
         common: Common,
     },
+    /// Write transcript.txt and .srt again from transcript.json (after a
+    /// change of their format; nothing is transcribed).
+    #[command(hide = true)]
+    Rewrite { dir: PathBuf },
     /// Tell the voices apart in an existing transcript of a session and
     /// rewrite its files (checks, older transcripts).
     #[command(hide = true)]
@@ -215,6 +219,15 @@ fn run(cli: Cli) -> Result<()> {
                 wave.num_samples() as f64 / 16_000.0,
                 t.elapsed().as_secs_f64()
             );
+            Ok(())
+        }
+        Cmd::Rewrite { dir } => {
+            let path = dir.join(recorder_transcribe::output::JSON_FILE);
+            let doc: recorder_transcribe::output::Document = serde_json::from_slice(
+                &std::fs::read(&path)
+                    .with_context(|| format!("no transcript in {}", dir.display()))?,
+            )?;
+            recorder_transcribe::output::write_all(&dir, &doc)?;
             Ok(())
         }
         Cmd::Voices {

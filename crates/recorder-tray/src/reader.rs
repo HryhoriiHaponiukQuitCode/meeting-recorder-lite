@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use eframe::egui::{
-    self, Align, Color32, FontId, Layout, RichText, Sense, TextFormat, pos2, text::LayoutJob, vec2,
+    self, Align, Color32, FontId, Layout, RichText, TextFormat, text::LayoutJob, vec2,
 };
 use recorder_transcribe::output::{Document, JSON_FILE, clock};
 use recorder_transcribe::{Speaker, dialog};
@@ -33,7 +33,6 @@ const TIME_W: f32 = 64.0;
 
 pub struct Person {
     pub label: String,
-    pub mic: bool,
     pub color: Color32,
 }
 
@@ -126,7 +125,6 @@ fn load(path: &Path) -> Result<Transcript, String> {
             };
             Person {
                 label: doc.label(speaker, voice),
-                mic,
                 color,
             }
         })
@@ -198,33 +196,38 @@ fn text_job(line: &Line, found: &[(usize, usize)], width: f32) -> LayoutJob {
     job
 }
 
-/// Everyone in the call: a dot in their colour and the label.
+/// Everyone in the call, in one quiet line: "Participants  Григорій ·
+/// Катя · Роман".
 pub fn people(ui: &mut egui::Ui, t: &Transcript) {
+    let names: Vec<&str> = t.people.iter().map(|p| p.label.as_str()).collect();
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(ui::S2, ui::S2);
-        for p in &t.people {
-            let text = if p.mic {
-                format!("{} · microphone", p.label)
-            } else {
-                p.label.clone()
-            };
-            let galley = ui.painter().layout_no_wrap(
-                text,
-                FontId::new(12.5, ui::medium()),
-                ui::INK_SECONDARY,
-            );
-            let size = vec2(galley.size().x + 30.0, 26.0);
-            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-            let painter = ui.painter();
-            painter.rect_filled(rect, 13, p.color.gamma_multiply(0.09));
-            painter.circle_filled(pos2(rect.left() + 13.0, rect.center().y), 4.0, p.color);
-            painter.galley(
-                pos2(rect.left() + 23.0, rect.center().y - galley.size().y / 2.0),
-                galley,
-                ui::INK_SECONDARY,
-            );
-        }
+        ui.spacing_mut().item_spacing.x = ui::S2;
+        ui.label(
+            RichText::new("Participants")
+                .font(FontId::new(13.0, ui::medium()))
+                .color(ui::INK_MUTED),
+        );
+        ui.label(
+            RichText::new(names.join("  ·  "))
+                .size(13.5)
+                .color(ui::INK_SECONDARY),
+        );
     });
+}
+
+/// The dialogue as plain text, as in transcript.txt (for Copy all).
+pub fn plain_text(t: &Transcript) -> String {
+    t.lines
+        .iter()
+        .map(|l| {
+            format!(
+                "[{}] {}: {}\n",
+                clock(l.start),
+                t.people[l.who].label,
+                l.text
+            )
+        })
+        .collect()
 }
 
 /// The search field; returns how many lines match (when searching).

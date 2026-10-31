@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Datelike, Local, Utc};
+use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Align, FontId, Layout, RichText, TextureHandle, ViewportCommand, vec2};
 use recorder_app::permissions::{self, Access, Permission};
 use recorder_app::sessions::{self, SessionInfo};
@@ -1199,17 +1199,10 @@ impl App {
                 ));
                 ui.add_space(ui::S2);
             }
-            // One list, grouped by day; more is read when the end shows.
-            let mut day = String::new();
+            // One list; more is read when its end shows.
             let mut last_rect = None;
+            ui.add_space(ui::S1);
             for s in &self.sessions {
-                let d = day_label(s.started);
-                if d != day {
-                    ui.add_space(ui::S3);
-                    ui.label(ui::caption(&d));
-                    ui.add_space(ui::S1);
-                    day = d;
-                }
                 let (a, rect) = self.session_row(ui, s);
                 if a.is_some() {
                     action = a;
@@ -1280,9 +1273,8 @@ impl App {
             ui.vertical(|ui| {
                 ui.add_space(ui::S2);
                 ui.spacing_mut().item_spacing.y = 2.0;
-                // The day is in the group heading above.
                 ui.label(
-                    RichText::new(s.started.with_timezone(&Local).format("%H:%M").to_string())
+                    RichText::new(when(s.started))
                         .font(FontId::new(14.0, ui::medium()))
                         .color(if selected { ui::BLUE } else { ui::INK }),
                 );
@@ -1405,9 +1397,9 @@ impl App {
                                 action = Some(TranscriptAction::Open(txt.clone()));
                             }
                             if ui::outline_small(ui, "Copy all", None).clicked()
-                                && let Ok(text) = std::fs::read_to_string(txt)
+                                && let Some(Ok(t)) = &self.reader.transcript
                             {
-                                ui.ctx().copy_text(text);
+                                ui.ctx().copy_text(reader::plain_text(t));
                                 self.message = Some(Message {
                                     text: "The transcript is copied.".into(),
                                     problem: false,
@@ -2044,23 +2036,6 @@ fn when(t: DateTime<Utc>) -> String {
         local.format("%-d %b").to_string()
     };
     format!("{prefix} at {}", local.format("%H:%M"))
-}
-
-/// The list's day headings: "Today", "Yesterday", "Monday, 27 Oct",
-/// "27 Oct 2025" for other years.
-fn day_label(t: DateTime<Utc>) -> String {
-    let local = t.with_timezone(&Local);
-    let today = Local::now().date_naive();
-    let day = local.date_naive();
-    if day == today {
-        "Today".into()
-    } else if today.pred_opt() == Some(day) {
-        "Yesterday".into()
-    } else if day.year() == today.year() {
-        local.format("%A, %-d %b").to_string()
-    } else {
-        local.format("%-d %b %Y").to_string()
-    }
 }
 
 /// "7 s", "12 min 5 s", "1 h 2 min".
