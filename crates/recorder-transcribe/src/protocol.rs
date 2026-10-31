@@ -23,6 +23,11 @@ pub enum Message {
     Error {
         message: String,
     },
+    /// The computer runs hot: resting (`warm`), waiting (`hot`) or back to
+    /// full speed (`normal`).
+    Heat {
+        heat: crate::heat::Heat,
+    },
 }
 
 impl Message {
@@ -50,5 +55,10 @@ mod tests {
         assert_eq!(line, r#"{"event":"progress","done_s":12.5,"total_s":60.0}"#);
         assert_eq!(Message::parse(&line), Some(m));
         assert_eq!(Message::parse("some engine log line"), None);
+        let h = Message::Heat {
+            heat: crate::heat::Heat::Hot,
+        };
+        assert_eq!(h.to_line(), r#"{"event":"heat","heat":"hot"}"#);
+        assert_eq!(Message::parse(&h.to_line()), Some(h));
     }
 }

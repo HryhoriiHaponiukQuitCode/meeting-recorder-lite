@@ -33,6 +33,7 @@ use recorder_transcribe::{SAMPLE_RATE, Speaker, dialog, voices};
 use sherpa_onnx::VoiceActivityDetector;
 
 use crate::engine::{Engine, VAD_WINDOW, vad_settings};
+use crate::pacer::{HeatReport, Pacer};
 use crate::voices::Embedder;
 
 /// Reported when the run was stopped on request.
@@ -173,6 +174,9 @@ pub struct Options {
     pub quality: Quality,
     /// Tell the voices of the system audio apart (Others 1, 2, …).
     pub voices: bool,
+    /// Told when the transcriber starts or stops resting because the
+    /// computer runs hot.
+    pub heat_report: Option<HeatReport>,
 }
 
 fn settings(opts: &Options) -> Settings {
@@ -465,6 +469,7 @@ fn run(
         last: Instant::now(),
     };
     let mut ckpt = Some(Checkpoint::open(dir, &signature(opts.quality))?);
+    let mut pacer = Pacer::new(opts.heat_report.clone());
 
     // Pass 1: Parakeet. The engine is dropped before Whisper loads, so the
     // two models never sit in memory together.
@@ -477,6 +482,7 @@ fn run(
             let before = me.chunks() + others.chunks();
             me.feed(l, &mut ckpt)?;
             others.feed(r, &mut ckpt)?;
+            pacer.tick(stop)?;
             let s = (pos + l.len() as u64) as f64 / SAMPLE_RATE as f64;
             progress.report(s * share, me.chunks() + others.chunks() > before, report);
             Ok(())
@@ -497,6 +503,7 @@ fn run(
             &channels,
             total_samples,
             &mut ckpt,
+            &mut pacer,
             &mut |done| progress.report(total_s * (share + shares.whisper * done), false, report),
             stop,
         )?
@@ -515,6 +522,7 @@ fn run(
             opts,
             &others_segments,
             others,
+            &mut pacer,
             &mut |done| {
                 progress.report(
                     total_s * (after_whisper + (1.0 - after_whisper) * done),
@@ -571,6 +579,7 @@ fn voice_pass(
     opts: &Options,
     segments: &[(u64, usize)],
     words: &mut [Word],
+    pacer: &mut Pacer,
     progress: &mut dyn FnMut(f64),
     stop: &AtomicBool,
 ) -> Result<u32> {
@@ -580,7 +589,10 @@ fn voice_pass(
     }
     let embedder = Embedder::load(&ModelPaths::in_dir(&opts.model_dir).voice, opts.threads)?;
     let (kept, prints) = voice_prints(&embedder, &wins, progress, &mut |on_block| {
-        stream_session(dir, manifest, stop, &mut |_, r, pos| on_block(r, pos))
+        stream_session(dir, manifest, stop, &mut |_, r, pos| {
+            on_block(r, pos)?;
+            pacer.tick(stop)
+        })
     })?;
     Ok(voices::assign(words, &kept, &prints))
 }
@@ -713,6 +725,7 @@ fn whisper_pass(
     channels: &[ChannelWords; 2],
     total_samples: u64,
     ckpt: &mut Option<Checkpoint>,
+    pacer: &mut Pacer,
     progress: &mut dyn FnMut(f64),
     stop: &AtomicBool,
 ) -> Result<Vec<(Speaker, Vec<Word>)>> {
@@ -756,7 +769,7 @@ fn whisper_pass(
             results[ch][k] = words;
             done_work += r.len() as f64;
             progress(done_work / work);
-            Ok(())
+            pacer.tick(stop)
         };
     stream_session(dir, manifest, stop, &mut |l, r, pos| {
         let end = pos + l.len() as u64;
@@ -809,6 +822,7 @@ fn whisper_pass(
     _channels: &[ChannelWords; 2],
     _total_samples: u64,
     _ckpt: &mut Option<Checkpoint>,
+    _pacer: &mut Pacer,
     _progress: &mut dyn FnMut(f64),
     _stop: &AtomicBool,
 ) -> Result<Vec<(Speaker, Vec<Word>)>> {

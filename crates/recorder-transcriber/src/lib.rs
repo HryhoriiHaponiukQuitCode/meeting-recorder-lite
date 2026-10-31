@@ -10,6 +10,7 @@
 //! and all its memory is returned when it exits.
 
 pub mod engine;
+pub mod pacer;
 pub mod pipeline;
 pub mod voices;
 #[cfg(target_os = "macos")]

@@ -982,12 +982,27 @@ impl App {
                 action = Some(TranscriptAction::Stop);
             }
             let st = job.state();
-            let text = if st.started && st.total_s > 0.0 {
+            let pct = if st.started && st.total_s > 0.0 {
                 format!("{:.0}%", st.done_s / st.total_s * 100.0)
             } else {
                 "Starting…".into()
             };
-            ui::pill(ui, &text, ui::Tone::Blue, true);
+            use recorder_transcribe::heat::Heat;
+            let (text, hint) = match st.heat {
+                Heat::Normal => (pct, None),
+                Heat::Warm => (
+                    format!("{pct} · resting"),
+                    Some("The Mac is warm: transcription takes breaks to cool it down."),
+                ),
+                Heat::Hot => (
+                    format!("{pct} · cooling down"),
+                    Some("The Mac is hot: transcription waits until it cools down."),
+                ),
+            };
+            let pill = ui::pill(ui, &text, ui::Tone::Blue, true);
+            if let Some(h) = hint {
+                pill.on_hover_text(h);
+            }
         } else if self.queue.iter().any(|d| d == dir) {
             if ui::outline_small(ui, "Cancel", None).clicked() {
                 action = Some(TranscriptAction::Unqueue(dir.to_path_buf()));

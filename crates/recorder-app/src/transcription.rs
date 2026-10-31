@@ -160,6 +160,8 @@ pub struct JobState {
     pub done: Option<Vec<String>>,
     pub error: Option<String>,
     pub stdout_closed: bool,
+    /// Resting because the computer runs hot.
+    pub heat: recorder_transcribe::heat::Heat,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -228,6 +230,7 @@ impl TranscriptionJob {
                         }
                         Message::Done { files, .. } => st.done = Some(files),
                         Message::Error { message } => st.error = Some(message),
+                        Message::Heat { heat } => st.heat = heat,
                     }
                 }
                 state.lock().expect("state").stdout_closed = true;

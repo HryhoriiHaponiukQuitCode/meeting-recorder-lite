@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use recorder_transcribe::heat::Heat;
 use recorder_transcribe::model::{self, ModelPaths, Quality};
 use recorder_transcribe::protocol::Message;
 use recorder_transcribe::{DEFAULT_THREADS, Speaker};
@@ -144,6 +145,14 @@ fn emit(json: bool, m: &Message) {
             processing_s,
         } => eprintln!("\nDone in {processing_s:.1} s: {}", files.join(", ")),
         Message::Error { message } => eprintln!("\nerror: {message}"),
+        Message::Heat { heat } => eprintln!(
+            "\n{}",
+            match heat {
+                Heat::Normal => "The computer has cooled down: full speed.",
+                Heat::Warm => "The computer is warm: taking breaks.",
+                Heat::Hot => "The computer is hot: waiting until it cools down.",
+            }
+        ),
     }
 }
 
@@ -153,6 +162,9 @@ fn run(cli: Cli) -> Result<()> {
             let opts = Options {
                 quality: common.quality(),
                 voices: !common.no_voices,
+                heat_report: Some(std::sync::Arc::new(move |heat| {
+                    emit(json, &Message::Heat { heat })
+                })),
                 model_dir: common.model_dir,
                 threads: common.threads,
             };
@@ -218,6 +230,7 @@ fn run(cli: Cli) -> Result<()> {
                     threads,
                     quality: Quality::Fast,
                     voices: true,
+                    heat_report: None,
                 },
             )?;
             eprintln!(

@@ -19,6 +19,7 @@
 pub mod checkpoint;
 pub mod chunk;
 pub mod dialog;
+pub mod heat;
 pub mod hybrid;
 pub mod model;
 pub mod names;
