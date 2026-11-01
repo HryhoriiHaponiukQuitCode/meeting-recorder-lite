@@ -88,7 +88,19 @@ const PAUSE_SPLIT_S: f64 = 1.5;
 /// Token duration when the recognizer gives none (one encoder frame).
 const DEFAULT_TOKEN_S: f64 = 0.08;
 
+/// Abbreviations whose dot does not end a sentence ("Mr. Foster", "ім.
+/// Шевченка"), lower case without the dot.
+const ABBREVIATIONS: &[&str] = &[
+    "mr", "mrs", "ms", "dr", "prof", "st", "jr", "sr", "vs", "e.g", "i.e", "ім", "вул", "див",
+    "напр", "проф", "акад",
+];
+
 fn ends_sentence(word: &str) -> bool {
+    if let Some(stem) = word.strip_suffix('.')
+        && ABBREVIATIONS.contains(&stem.to_lowercase().as_str())
+    {
+        return false;
+    }
     word.ends_with(['.', '?', '!', '…'])
 }
 
@@ -209,6 +221,25 @@ mod tests {
         assert!((u[2].start - 100.1).abs() < 1e-6);
         assert_eq!(u[2].text, "Добре");
         assert!(u.iter().all(|x| x.speaker == Speaker::Others));
+    }
+
+    #[test]
+    fn titles_do_not_end_a_sentence() {
+        let w = |t: &str, s: f64| Word::new(t, s, s + 0.2);
+        let u = group(
+            Speaker::Others,
+            vec![
+                w("poem.", 0.0),
+                w("Mr.", 0.3),
+                w("Burkett", 0.6),
+                w("smiles.", 0.9),
+                w("Dr.", 1.2),
+                w("Foster", 1.5),
+            ],
+        );
+        let texts: Vec<_> = u.iter().map(|u| u.text.as_str()).collect();
+        assert_eq!(texts, ["poem.", "Mr. Burkett smiles.", "Dr. Foster"]);
+        assert!(ends_sentence("end.") && ends_sentence("так?") && !ends_sentence("вул."));
     }
 
     #[test]

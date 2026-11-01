@@ -4,8 +4,8 @@
 //! ```sh
 //! MR_MODEL_DIR=.../models \
 //! MR_TEST_EN_WAV=.../english-source.wav MR_TEST_EN_REF=.../english-reference.txt \
-//! MR_TEST_EN_GOLDEN=.../en-rust-static.txt \
-//! MR_TEST_UA_WAV=.../voice-114619.wav MR_TEST_UA_GOLDEN=.../uk-rust-static.txt \
+//! MR_TEST_EN_GOLDEN=.../en-rust-fp32-pad.txt \
+//! MR_TEST_UA_WAV=.../voice-114619.wav MR_TEST_UA_GOLDEN=.../uk-rust-fp32-pad.txt \
 //! cargo test --release -p recorder-transcriber -- --ignored --test-threads 1
 //! ```
 //!
@@ -155,7 +155,8 @@ fn ukrainian_matches_the_golden_text() {
     let text = ch.text();
     let latin = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
     assert_eq!(latin, 0, "Latin letters in the Ukrainian text: {text}");
-    assert_eq!(ch.chunks(), 12);
+    // 0.2 s around each segment: one chunk more than without (12).
+    assert_eq!(ch.chunks(), 13);
     assert_eq!(
         text,
         golden("MR_TEST_UA_GOLDEN").expect("set MR_TEST_UA_GOLDEN")
@@ -507,12 +508,13 @@ fn best_quality_restores_what_whisper_skipped() {
     };
     let root = temp_root("restore");
     // Key words of the skipped passages (Parakeet's wording from the Opus
-    // recording differs from the WAV, so not whole phrases).
+    // recording differs from the WAV, so not whole phrases). "за домен":
+    // the INT8 model heard "поза домен".
     for (file, must) in [
         ("01-meeting-others-a.wav", ["смішно", "за вік", "окей"]),
         (
             "08-project-others.wav",
-            ["писала", "поза домен", "їм написала"],
+            ["писала", "за домен", "їм написала"],
         ),
     ] {
         let dir = make_session(&root, 0, &[], &read(file));

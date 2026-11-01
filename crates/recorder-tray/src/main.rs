@@ -1140,6 +1140,8 @@ impl App {
             "Starts when the recording ends.".into()
         } else if queued {
             "Starts shortly.".into()
+        } else if self.model_status == ModelStatus::Outdated {
+            "Update the speech model in Settings to transcribe.".into()
         } else if self.model_status != ModelStatus::Ready {
             "Download the speech model once to transcribe calls on this computer.".into()
         } else {
@@ -1194,9 +1196,11 @@ impl App {
                 return;
             }
             if self.model_status != ModelStatus::Ready {
-                ui.label(ui::muted(
-                    "To transcribe, download the speech model once in Settings.",
-                ));
+                ui.label(ui::muted(if self.model_status == ModelStatus::Outdated {
+                    "To transcribe, update the speech model in Settings."
+                } else {
+                    "To transcribe, download the speech model once in Settings."
+                }));
                 ui.add_space(ui::S2);
             }
             // One list; more is read when its end shows.
@@ -1462,6 +1466,11 @@ impl App {
                         "Transcription failed",
                         &format!("{e}. Try again above."),
                     ),
+                    _ if self.model_status == ModelStatus::Outdated => empty_state(
+                        ui,
+                        "No transcript yet",
+                        "Update the speech models in Settings, then press Transcribe.",
+                    ),
                     _ if self.model_status != ModelStatus::Ready => empty_state(
                         ui,
                         "No transcript yet",
@@ -1590,6 +1599,9 @@ impl App {
                 (None, ModelStatus::Incomplete) => {
                     ui::pill(ui, "Incomplete", ui::Tone::Amber, false);
                 }
+                (None, ModelStatus::Outdated) => {
+                    ui::pill(ui, "Update", ui::Tone::Amber, false);
+                }
                 (None, ModelStatus::Missing) => {
                     ui::pill(ui, "Not set up", ui::Tone::Grey, false);
                 }
@@ -1622,7 +1634,7 @@ impl App {
                      An hour of call takes about 10–20 minutes."
                 }
                 Quality::Fast => {
-                    "Parakeet alone: an hour of call takes about 2 minutes, with more mistakes \
+                    "Parakeet alone: an hour of call takes about 3 minutes, with more mistakes \
                      in words and terms."
                 }
             }));
@@ -1644,7 +1656,6 @@ impl App {
                             format!("Downloading… {:.0} of {:.0} MB", mb(done), mb(total))
                         }
                         Phase::Verifying => "Checking the files…".into(),
-                        Phase::Unpacking => "Unpacking…".into(),
                     })
                     .color(ui::INK),
                 );
@@ -1672,15 +1683,27 @@ impl App {
             });
         } else {
             let missing = transcription::missing_bytes(&self.settings.models_dir(), quality);
-            let label = format!("Download speech models ({:.0} MB)", mb(missing));
+            let gb = missing as f64 / 1_073_741_824.0;
+            let outdated = self.model_status == ModelStatus::Outdated;
+            let label = if outdated {
+                format!("Update speech models ({gb:.1} GB)")
+            } else {
+                format!("Download speech models ({gb:.1} GB)")
+            };
             start = ui::primary(ui, &label, None, None, true).clicked();
             ui.add_space(ui::S1);
+            if outdated {
+                ui.label(ui::muted(
+                    "A more accurate speech model: about half the mistakes, and no lost \
+                     sentences in English. It replaces the old one.",
+                ));
+            }
             ui.label(ui::muted(match quality {
                 Quality::Best => {
-                    "Once. About 1.5 GB on disk and up to 2 GB of memory while transcribing."
+                    "Once. About 3.5 GB on disk and up to 4 GB of memory while transcribing."
                 }
                 Quality::Fast => {
-                    "Once. Takes about 670 MB on disk and 1.5 GB of memory while transcribing."
+                    "Once. About 2.6 GB on disk and up to 3 GB of memory while transcribing."
                 }
             }));
         }

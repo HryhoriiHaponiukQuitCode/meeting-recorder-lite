@@ -1,9 +1,13 @@
 //! The speech models and which of them each [`Quality`] needs:
 //!
-//! - **Fast** (every system): NVIDIA Parakeet TDT 0.6B v3 (INT8, sherpa-onnx
-//!   export, CC-BY-4.0), the silero voice activity detector (MIT) and the
-//!   3D-Speaker CAM++ voice-print model that tells the voices of the system
-//!   audio apart (Apache-2.0, 27 MiB), 667 MiB.
+//! - **Fast** (every system): NVIDIA Parakeet TDT 0.6B v3 (full precision,
+//!   sherpa-onnx export, CC-BY-4.0), the silero voice activity detector (MIT)
+//!   and the 3D-Speaker CAM++ voice-print model that tells the voices of the
+//!   system audio apart (Apache-2.0, 27 MiB), 2.4 GiB. The INT8 export used
+//!   before is a quarter of the size but much less accurate (FLEURS
+//!   sentences joined into 90 s clips with pauses: Ukrainian WER 13.4% →
+//!   10.9%, English 18.1% → 8.2%; INT8 drops whole English sentences) and
+//!   on Apple silicon no faster.
 //! - **Best** (macOS): the same plus OpenAI Whisper large-v3-turbo (Q8,
 //!   ggml for whisper.cpp, MIT), 834 MiB, run on the GPU through Metal. The
 //!   transcript takes Whisper's words and fills what Whisper skipped from
@@ -16,14 +20,15 @@
 //! models/
 //!   silero_vad.onnx
 //!   3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
-//!   sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/
-//!     encoder.int8.onnx  decoder.int8.onnx  joiner.int8.onnx  tokens.txt
+//!   sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/
+//!     encoder.onnx  encoder.weights  decoder.onnx  joiner.onnx  tokens.txt
 //!   ggml-large-v3-turbo-q8_0.bin           (Best only)
 //! ```
 //!
-//! Download uses the system `curl` and `tar` (present on macOS and on
-//! Windows 10 1803+): resumable, retried, and checked against pinned
-//! SHA256 hashes before anything is moved into place.
+//! Download uses the system `curl` (present on macOS and on Windows 10
+//! 1803+): resumable, retried, and checked against pinned SHA256 hashes
+//! before anything is moved into place. The folder of the old INT8 model is
+//! removed once the new one is in place.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -37,7 +42,9 @@ use sha2::{Digest, Sha256};
 
 pub const ENGINE: &str = "sherpa-onnx 1.13.8";
 pub const WHISPER_ENGINE: &str = "whisper.cpp 1.8.3";
-pub const ASR_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+pub const ASR_DIR: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3";
+/// Folders of earlier Parakeet exports: an existing one means "update".
+const OLD_ASR_DIRS: [&str; 1] = ["sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"];
 pub const MODEL_NAME: &str = ASR_DIR;
 pub const WHISPER_MODEL_NAME: &str = "whisper-large-v3-turbo-q8_0";
 pub const ATTRIBUTION: &str = "Speech recognition: NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0), \
@@ -102,28 +109,46 @@ pub struct ModelFile {
     pub sha256: &'static str,
 }
 
-pub const ASR_FILES: [ModelFile; 4] = [
-    ModelFile {
-        name: "encoder.int8.onnx",
-        size: 652_184_281,
-        sha256: "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
-    },
-    ModelFile {
-        name: "decoder.int8.onnx",
-        size: 11_845_275,
-        sha256: "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
-    },
-    ModelFile {
-        name: "joiner.int8.onnx",
-        size: 6_355_277,
-        sha256: "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
-    },
-    ModelFile {
-        name: "tokens.txt",
-        size: 93_939,
-        sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
-    },
-];
+const ENCODER: ModelFile = ModelFile {
+    name: "encoder.onnx",
+    size: 41_766_257,
+    sha256: "3eed7ce424bf8339ad09233533c687e2dbd07e74ccf5027b5e7344019ea373b0",
+};
+/// The encoder's weights (over 2 GB, so outside the ONNX file); the
+/// encoder finds them by this name next to it.
+const ENCODER_WEIGHTS: ModelFile = ModelFile {
+    name: "encoder.weights",
+    size: 2_435_420_160,
+    sha256: "3af3f51af5f2d01dbbf5af47d42c7962a2c205f11004254bb4f2b979862f39a8",
+};
+const DECODER: ModelFile = ModelFile {
+    name: "decoder.onnx",
+    size: 47_233_743,
+    sha256: "d593cdb0e571f5a457ec2219af9968cbf6b0e8198e8f7839b40a8754593bf68c",
+};
+const JOINER: ModelFile = ModelFile {
+    name: "joiner.onnx",
+    size: 25_286_330,
+    sha256: "b9b0bcf88ac571902e69a6536223ed2d94885e981b85045410f1403d53121a63",
+};
+const TOKENS: ModelFile = ModelFile {
+    name: "tokens.txt",
+    size: 93_939,
+    sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+};
+pub const ASR_FILES: [ModelFile; 5] = [ENCODER, ENCODER_WEIGHTS, DECODER, JOINER, TOKENS];
+/// The sherpa-onnx export on Hugging Face, pinned to a revision.
+const ASR_URL: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4";
+
+const fn asr_size() -> u64 {
+    let mut n = 0;
+    let mut i = 0;
+    while i < ASR_FILES.len() {
+        n += ASR_FILES[i].size;
+        i += 1;
+    }
+    n
+}
 
 pub const VAD_FILE: ModelFile = ModelFile {
     name: "silero_vad.onnx",
@@ -142,11 +167,6 @@ pub const VOICE_FILE: ModelFile = ModelFile {
 pub const VOICE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx";
 pub const VOICE_MODEL_NAME: &str = "3dspeaker-campplus-zh-en-advanced";
 
-const ARCHIVE_NAME: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
-pub const ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
-const ARCHIVE_SIZE: u64 = 487_170_055;
-const ARCHIVE_SHA256: &str = "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf";
-
 pub const WHISPER_FILE: ModelFile = ModelFile {
     name: "ggml-large-v3-turbo-q8_0.bin",
     size: 874_188_075,
@@ -157,7 +177,7 @@ pub const WHISPER_URL: &str =
 
 /// Bytes downloaded for `quality` when nothing is there yet.
 pub fn download_size(quality: Quality) -> u64 {
-    ARCHIVE_SIZE
+    asr_size()
         + VAD_FILE.size
         + VOICE_FILE.size
         + if quality.needs_whisper() {
@@ -187,10 +207,10 @@ impl ModelPaths {
     pub fn in_dir(dir: &Path) -> Self {
         let asr = dir.join(ASR_DIR);
         Self {
-            encoder: asr.join(ASR_FILES[0].name),
-            decoder: asr.join(ASR_FILES[1].name),
-            joiner: asr.join(ASR_FILES[2].name),
-            tokens: asr.join(ASR_FILES[3].name),
+            encoder: asr.join(ENCODER.name),
+            decoder: asr.join(DECODER.name),
+            joiner: asr.join(JOINER.name),
+            tokens: asr.join(TOKENS.name),
             vad: dir.join(VAD_FILE.name),
             voice: dir.join(VOICE_FILE.name),
             whisper: dir.join(WHISPER_FILE.name),
@@ -204,6 +224,8 @@ pub enum ModelStatus {
     Missing,
     /// Some files missing or of the wrong size (interrupted or damaged).
     Incomplete,
+    /// An earlier Parakeet export is there, the current one is not yet.
+    Outdated,
     /// All files present with the expected sizes.
     Ready,
 }
@@ -230,8 +252,13 @@ fn size_ok(path: &Path, f: &ModelFile) -> bool {
 /// Quick check by file sizes of what `quality` needs (hashes are checked
 /// after download and by [`verify`]).
 pub fn status(dir: &Path, quality: Quality) -> ModelStatus {
+    let asr = dir.join(ASR_DIR);
     if all_files(dir, quality).all(|(p, f)| size_ok(&p, &f)) {
         ModelStatus::Ready
+    } else if OLD_ASR_DIRS.iter().any(|d| dir.join(d).exists())
+        && ASR_FILES.iter().all(|f| !asr.join(f.name).exists())
+    {
+        ModelStatus::Outdated
     } else if all_files(dir, quality).all(|(p, _)| !p.exists()) && !dir.join(WORK_DIR).exists() {
         ModelStatus::Missing
     } else {
@@ -249,8 +276,10 @@ pub fn missing_bytes(dir: &Path, quality: Quality) -> u64 {
             n += f.size;
         }
     }
-    if !ASR_FILES.iter().all(|f| size_ok(&asr.join(f.name), f)) {
-        n += ARCHIVE_SIZE;
+    for f in &ASR_FILES {
+        if !size_ok(&asr.join(f.name), f) {
+            n += f.size;
+        }
     }
     if quality.needs_whisper() && !size_ok(&dir.join(WHISPER_FILE.name), &WHISPER_FILE) {
         n += WHISPER_FILE.size;
@@ -270,6 +299,7 @@ pub fn disk_size(dir: &Path) -> u64 {
         }
     }
     walk(&dir.join(ASR_DIR))
+        + OLD_ASR_DIRS.iter().map(|d| walk(&dir.join(d))).sum::<u64>()
         + walk(&dir.join(VAD_FILE.name))
         + walk(&dir.join(VOICE_FILE.name))
         + walk(&dir.join(WHISPER_FILE.name))
@@ -320,7 +350,8 @@ pub fn verify(dir: &Path, quality: Quality) -> io::Result<()> {
 /// Removes the model files and partial downloads (other files in a
 /// user-chosen folder are left alone).
 pub fn delete(dir: &Path) -> io::Result<()> {
-    for p in [dir.join(ASR_DIR), dir.join(WORK_DIR)] {
+    let dirs = [ASR_DIR, WORK_DIR].into_iter().chain(OLD_ASR_DIRS);
+    for p in dirs.map(|d| dir.join(d)) {
         if p.exists() {
             fs::remove_dir_all(&p)?;
         }
@@ -338,7 +369,6 @@ pub fn delete(dir: &Path) -> io::Result<()> {
 pub enum Phase {
     Downloading,
     Verifying,
-    Unpacking,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -486,71 +516,32 @@ pub fn download(
         before += f.size;
     }
 
+    // Parakeet, file by file into its folder.
     let asr = dir.join(ASR_DIR);
-    let asr_ok = ASR_FILES
-        .iter()
-        .all(|f| size_ok(&asr.join(f.name), f) && check_hash(&asr.join(f.name), f.sha256).is_ok());
-    if !asr_ok {
-        let archive = work.join(ARCHIVE_NAME);
-        fetch(
-            ARCHIVE_URL,
-            &archive,
-            ARCHIVE_SIZE,
-            (before, total),
-            progress,
-            cancel,
-        )?;
-        if let Err(e) = check_hash(&archive, ARCHIVE_SHA256) {
-            let _ = fs::remove_file(&archive);
-            return Err(io::Error::new(
-                e.kind(),
-                "the downloaded model is damaged; it was deleted, please try again",
-            ));
+    fs::create_dir_all(&asr)?;
+    for f in &ASR_FILES {
+        let dest = asr.join(f.name);
+        if !size_ok(&dest, f) || check_hash(&dest, f.sha256).is_err() {
+            let part = work.join(f.name);
+            let url = format!("{ASR_URL}/{}", f.name);
+            fetch(&url, &part, f.size, (before, total), progress, cancel)?;
+            if let Err(e) = check_hash(&part, f.sha256) {
+                let _ = fs::remove_file(&part);
+                return Err(io::Error::new(
+                    e.kind(),
+                    "the downloaded model is damaged; it was deleted, please try again",
+                ));
+            }
+            fs::rename(&part, &dest)?;
         }
-        if cancel.load(Ordering::SeqCst) {
-            return Err(cancelled());
+        before += f.size;
+    }
+    // The old export is not needed any more.
+    for d in OLD_ASR_DIRS {
+        let p = dir.join(d);
+        if p.exists() {
+            let _ = fs::remove_dir_all(p);
         }
-        progress(DownloadProgress {
-            phase: Phase::Unpacking,
-            done: before + ARCHIVE_SIZE,
-            total,
-        });
-        let unpack = work.join("unpack");
-        if unpack.exists() {
-            fs::remove_dir_all(&unpack)?;
-        }
-        fs::create_dir_all(&unpack)?;
-        let out = system_tool("tar")
-            .arg("-xjf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&unpack)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| io::Error::new(e.kind(), format!("cannot run tar: {e}")))?;
-        if !out.status.success() {
-            return Err(io::Error::other(format!(
-                "cannot unpack the model: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        // Keep only the four files, checked, in a fresh folder.
-        let staged = work.join(ASR_DIR);
-        if staged.exists() {
-            fs::remove_dir_all(&staged)?;
-        }
-        fs::create_dir_all(&staged)?;
-        for f in &ASR_FILES {
-            let src = unpack.join(ASR_DIR).join(f.name);
-            check_hash(&src, f.sha256)?;
-            fs::rename(&src, staged.join(f.name))?;
-        }
-        if asr.exists() {
-            fs::remove_dir_all(&asr)?;
-        }
-        fs::rename(&staged, &asr)?;
-        let _ = fs::remove_dir_all(&unpack);
-        let _ = fs::remove_file(&archive);
     }
 
     let whisper = dir.join(WHISPER_FILE.name);
@@ -562,7 +553,7 @@ pub fn download(
             WHISPER_URL,
             &part,
             WHISPER_FILE.size,
-            (before + ARCHIVE_SIZE, total),
+            (before, total),
             progress,
             cancel,
         )?;
@@ -610,8 +601,31 @@ mod tests {
         let p = ModelPaths::in_dir(&d);
         assert!(
             p.encoder
-                .ends_with("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx")
+                .ends_with("sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/encoder.onnx")
         );
+        fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn the_old_int8_model_means_an_update() {
+        let d = std::env::temp_dir().join(format!("mr-model-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let old = d.join(OLD_ASR_DIRS[0]);
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("encoder.int8.onnx"), b"old").unwrap();
+        fs::write(d.join(VAD_FILE.name), b"x").unwrap();
+        for q in [Quality::Fast, Quality::Best] {
+            assert_eq!(status(&d, q), ModelStatus::Outdated);
+        }
+        assert!(disk_size(&d) >= 4, "the old model counts");
+        // Once part of the new model is there it is an interrupted download.
+        fs::create_dir_all(d.join(ASR_DIR)).unwrap();
+        fs::write(d.join(ASR_DIR).join(TOKENS.name), b"x").unwrap();
+        assert_eq!(status(&d, Quality::Fast), ModelStatus::Incomplete);
+        assert!(missing_bytes(&d, Quality::Fast) > ENCODER_WEIGHTS.size);
+        delete(&d).unwrap();
+        assert!(!old.exists());
+        assert_eq!(status(&d, Quality::Fast), ModelStatus::Missing);
         fs::remove_dir_all(d).ok();
     }
 

@@ -10,12 +10,81 @@
 //! them** into chunks of at most 30 s of speech, each decoded on its own.
 //! A [`Chunk`] remembers where each piece came from, so recognizer times
 //! inside the chunk map back to the recording timeline.
+//!
+//! Each segment takes [`SEGMENT_PAD_S`] of audio from before and after it
+//! ([`Padder`]): the detector cuts close to the words, and Parakeet then
+//! garbles or invents words at the cut. Measured on FLEURS sentences joined
+//! into 90 s clips with pauses (Parakeet fp32, greedy): Ukrainian WER 10.9%
+//! → 7.4%, English 8.2% → 7.0%; 0.4 s was no better.
 
 use crate::SAMPLE_RATE;
 
 /// At most this much speech per chunk.
 pub const MAX_CHUNK_SECONDS: usize = 30;
 const MAX_CHUNK_SAMPLES: usize = MAX_CHUNK_SECONDS * SAMPLE_RATE;
+
+/// Audio added before and after each voice-activity segment.
+pub const SEGMENT_PAD_S: f64 = 0.2;
+
+/// Widens voice-activity segments by [`SEGMENT_PAD_S`] on each side, from
+/// the audio around them. Feed it every sample given to the detector, in
+/// order ([`Padder::push`]), then pass each segment the detector returns
+/// ([`Padder::widen`]). The padding never reaches into the previous
+/// segment, and after a segment only as far as the audio already pushed
+/// (a segment cut at the detector's maximum length gets none there).
+#[derive(Debug)]
+pub struct Padder {
+    /// Recent audio; `buf[0]` is sample `base` of the signal.
+    buf: Vec<f32>,
+    base: u64,
+    /// End of the last widened segment.
+    prev_end: u64,
+    pad: u64,
+    keep: usize,
+}
+
+impl Padder {
+    /// `keep_s`: how far back a segment can start, relative to the newest
+    /// pushed sample (the detector's maximum segment length and its delay).
+    pub fn new(keep_s: f64) -> Self {
+        Self {
+            buf: Vec::new(),
+            base: 0,
+            prev_end: 0,
+            pad: (SEGMENT_PAD_S * SAMPLE_RATE as f64) as u64,
+            keep: (keep_s * SAMPLE_RATE as f64) as usize,
+        }
+    }
+
+    pub fn push(&mut self, samples: &[f32]) {
+        self.buf.extend_from_slice(samples);
+        if self.buf.len() > 2 * self.keep {
+            let drop = self.buf.len() - self.keep;
+            self.buf.drain(..drop);
+            self.base += drop as u64;
+        }
+    }
+
+    /// The segment at `start` with `samples` (as the detector gave them),
+    /// widened: its new start and samples.
+    pub fn widen(&mut self, start: u64, samples: &[f32]) -> (u64, Vec<f32>) {
+        let end = start + samples.len() as u64;
+        let have = self.base + self.buf.len() as u64;
+        if start < self.base || end > have {
+            // Not in the kept audio (should not happen): as it is.
+            self.prev_end = self.prev_end.max(end);
+            return (start, samples.to_vec());
+        }
+        let a = start
+            .saturating_sub(self.pad)
+            .max(self.prev_end.min(start))
+            .max(self.base);
+        let b = (end + self.pad).min(have);
+        self.prev_end = b;
+        let (i, j) = ((a - self.base) as usize, (b - self.base) as usize);
+        (a, self.buf[i..j].to_vec())
+    }
+}
 
 /// One voice-activity segment inside a chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +196,54 @@ mod tests {
         assert!(c.push(0, &vec![0.0; secs(20.0)]).is_none());
         assert!(c.push(secs(25.0) as u64, &vec![0.0; secs(10.0)]).is_none());
         assert_eq!(c.finish().unwrap().samples.len(), secs(30.0));
+    }
+
+    /// Signal whose sample i has the value i (exact in f32 up to 2^24).
+    fn ramp(from: usize, n: usize) -> Vec<f32> {
+        (from..from + n).map(|i| i as f32).collect()
+    }
+
+    #[test]
+    fn segments_widen_by_the_pad_without_overlap() {
+        let pad = secs(SEGMENT_PAD_S);
+        let mut p = Padder::new(30.0);
+        p.push(&ramp(0, secs(10.0)));
+        // A segment from 2 s to 3 s gets 0.2 s on each side.
+        let (s1, x1) = p.widen(secs(2.0) as u64, &ramp(secs(2.0), secs(1.0)));
+        assert_eq!(s1, (secs(2.0) - pad) as u64);
+        assert_eq!(x1.len(), secs(1.0) + 2 * pad);
+        assert_eq!(x1[0], (secs(2.0) - pad) as f32, "real audio, not silence");
+        // The next one starts 0.3 s after: its padding stops where the
+        // previous widened segment ended (3.2 s).
+        let (s2, x2) = p.widen(secs(3.3) as u64, &ramp(secs(3.3), secs(1.0)));
+        assert_eq!(s2, (secs(3.0) + pad) as u64);
+        assert_eq!(x2.len(), secs(4.3) + pad - (secs(3.0) + pad));
+        // Starting before the previous padding ended (4.5 s): no padding
+        // before, and the segment itself is never cut.
+        let (s2b, _) = p.widen(secs(4.4) as u64, &ramp(secs(4.4), secs(1.0)));
+        assert_eq!(s2b, secs(4.4) as u64);
+        // At the end of what was pushed: no padding after.
+        let (_, x3) = p.widen(secs(9.5) as u64, &ramp(secs(9.5), secs(0.5)));
+        assert_eq!(*x3.last().unwrap(), (secs(10.0) - 1) as f32);
+        // At the very start: no padding before.
+        let mut q = Padder::new(30.0);
+        q.push(&ramp(0, secs(2.0)));
+        assert_eq!(q.widen(secs(0.1) as u64, &ramp(secs(0.1), secs(1.0))).0, 0);
+    }
+
+    #[test]
+    fn old_audio_is_dropped_but_recent_segments_still_widen() {
+        let mut p = Padder::new(1.0);
+        for k in 0..10 {
+            p.push(&ramp(k * secs(1.0), secs(1.0)));
+        }
+        assert!(p.buf.len() <= 2 * secs(1.0));
+        let (s, x) = p.widen(secs(9.0) as u64, &ramp(secs(9.0), secs(0.5)));
+        assert_eq!(s, (secs(9.0) - secs(SEGMENT_PAD_S)) as u64);
+        assert_eq!(x[0], s as f32);
+        // Too old to widen: returned as given.
+        let old = ramp(secs(1.0), secs(0.5));
+        assert_eq!(p.widen(secs(1.0) as u64, &old), (secs(1.0) as u64, old));
     }
 
     #[test]

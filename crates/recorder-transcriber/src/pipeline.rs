@@ -20,7 +20,7 @@ use chrono::Utc;
 use recorder_core::decode::PartReader;
 use recorder_core::manifest::{Manifest, PartStatus, Status, TranscriptInfo, TranscriptStatus};
 use recorder_transcribe::checkpoint::Checkpoint;
-use recorder_transcribe::chunk::{Chunk, Chunker, MAX_CHUNK_SECONDS};
+use recorder_transcribe::chunk::{Chunk, Chunker, MAX_CHUNK_SECONDS, Padder, SEGMENT_PAD_S};
 #[cfg(target_os = "macos")]
 use recorder_transcribe::hybrid::{self, Region};
 use recorder_transcribe::model::{self, ModelPaths, ModelStatus, Quality};
@@ -55,6 +55,8 @@ pub struct Channel<'e> {
     vad: VoiceActivityDetector,
     /// Samples not yet making up a full VAD window.
     pending: Vec<f32>,
+    /// Widens the segments with the audio around them.
+    padder: Padder,
     chunker: Chunker,
     /// Decoded chunks (timing only, samples dropped) and their results.
     decoded: Vec<(Chunk, ChunkResult)>,
@@ -67,6 +69,9 @@ impl<'e> Channel<'e> {
             speaker,
             vad: engine.vad()?,
             pending: Vec::with_capacity(VAD_WINDOW * 2),
+            // A segment starts at most its maximum length (plus the
+            // detector's delay) before the newest window.
+            padder: Padder::new(f64::from(vad_settings().max_speech_s) + 10.0),
             chunker: Chunker::default(),
             decoded: Vec::new(),
         })
@@ -78,6 +83,7 @@ impl<'e> Channel<'e> {
         let full = pending.len() / VAD_WINDOW * VAD_WINDOW;
         let mut result = Ok(());
         for window in pending[..full].as_chunks::<VAD_WINDOW>().0 {
+            self.padder.push(window);
             self.vad.accept_waveform(window);
             result = self.take_segments(ckpt);
             if result.is_err() {
@@ -102,7 +108,7 @@ impl<'e> Channel<'e> {
 
     fn take_segments(&mut self, ckpt: &mut Option<Checkpoint>) -> Result<()> {
         while let Some(seg) = self.vad.front() {
-            let (start, s) = (seg.start() as u64, seg.samples().to_vec());
+            let (start, s) = self.padder.widen(seg.start() as u64, seg.samples());
             drop(seg);
             self.vad.pop();
             if let Some(chunk) = self.chunker.push(start, &s) {
@@ -189,7 +195,9 @@ fn settings(opts: &Options) -> Settings {
             "greedy_search".into()
         },
         vad: vad_settings(),
-        chunking: "speech segments joined without pauses".into(),
+        chunking: format!(
+            "speech segments widened by {SEGMENT_PAD_S} s, joined without pauses"
+        ),
         max_chunk_speech_s: MAX_CHUNK_SECONDS as u32,
         voices: opts.voices.then(VoiceSettings::current),
     }
@@ -214,11 +222,12 @@ fn model_name(q: Quality) -> String {
 /// Identifies results that can be reused (threads do not change the text).
 fn signature(q: Quality) -> String {
     format!(
-        "{}|{}|{:?}|{}|{}",
+        "{}|{}|{:?}|{}|pad {}|{}",
         engine_name(q),
         model_name(q),
         vad_settings(),
         MAX_CHUNK_SECONDS,
+        SEGMENT_PAD_S,
         q.as_str()
     )
 }

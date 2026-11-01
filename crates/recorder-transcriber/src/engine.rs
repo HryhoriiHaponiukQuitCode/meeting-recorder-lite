@@ -114,7 +114,18 @@ impl Engine {
             .get_result()
             .context("the recognizer returned no result")?;
         Ok(ChunkResult {
-            text: r.text,
+            // The full-precision model now and then emits its "unknown"
+            // token where a quote or dash was said; the words skip it
+            // (`transcript::chunk_words`), so the text does too.
+            text: if r.text.contains("<unk>") {
+                r.text
+                    .replace("<unk>", " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                r.text
+            },
             tokens: r.tokens,
             timestamps: r.timestamps.unwrap_or_default(),
             durations: r.durations.unwrap_or_default(),
