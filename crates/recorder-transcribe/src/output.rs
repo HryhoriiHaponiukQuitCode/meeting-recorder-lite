@@ -100,7 +100,12 @@ pub struct Participant {
     /// Found in the conversation ("Дякую, Роман, за коментар").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// What the text shows: the name or "Participant N".
+    /// Given by the user in the window ([`rename_participant`]); wins over
+    /// the found name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub given: Option<String>,
+    /// What the text shows: the given name, the found one or
+    /// "Participant N".
     pub label: String,
 }
 
@@ -116,6 +121,100 @@ impl Document {
     }
 }
 
+/// Longer participant names are cut.
+pub const NAME_MAX_CHARS: usize = 60;
+
+impl Document {
+    /// Names the participant `speaker`/`voice`; an empty `name` brings back
+    /// the name found in the call (or "Participant N"). False when no
+    /// utterance is theirs.
+    pub fn rename(&mut self, speaker: crate::Speaker, voice: Option<u32>, name: &str) -> bool {
+        if !self
+            .utterances
+            .iter()
+            .any(|u| u.speaker == speaker && u.voice == voice)
+        {
+            return false;
+        }
+        let name: String = name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(NAME_MAX_CHARS)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        // The automatic label, as the transcriber made it.
+        let found = participants(&self.utterances)
+            .into_iter()
+            .find(|p| p.speaker == speaker && p.voice == voice);
+        let i = match self
+            .participants
+            .iter()
+            .position(|p| p.speaker == speaker && p.voice == voice)
+        {
+            Some(i) => i,
+            None => {
+                // Transcripts made before names: every participant gets an
+                // entry, so the others keep their labels.
+                if self.participants.is_empty() {
+                    self.participants = participants(&self.utterances);
+                }
+                match self
+                    .participants
+                    .iter()
+                    .position(|p| p.speaker == speaker && p.voice == voice)
+                {
+                    Some(i) => i,
+                    None => {
+                        self.participants.push(found.clone().unwrap_or(Participant {
+                            speaker,
+                            voice,
+                            name: None,
+                            given: None,
+                            label: crate::transcript::label(speaker, voice),
+                        }));
+                        self.participants.len() - 1
+                    }
+                }
+            }
+        };
+        let p = &mut self.participants[i];
+        if name.is_empty() {
+            p.given = None;
+            p.label = p
+                .name
+                .clone()
+                .or_else(|| found.map(|f| f.label))
+                .unwrap_or_else(|| crate::transcript::label(speaker, voice));
+        } else {
+            p.given = Some(name.clone());
+            p.label = name;
+        }
+        true
+    }
+}
+
+/// Renames a participant of the transcript in `dir` and writes its three
+/// files again ([`Document::rename`]).
+pub fn rename_participant(
+    dir: &Path,
+    speaker: crate::Speaker,
+    voice: Option<u32>,
+    name: &str,
+) -> io::Result<()> {
+    let bytes = fs::read(dir.join(JSON_FILE))?;
+    let mut doc: Document = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if !doc.rename(speaker, voice, name) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "this participant is not in the transcript",
+        ));
+    }
+    write_all(dir, &doc).map(|_| ())
+}
+
 /// Participants of a dialogue with their labels (names where found).
 pub fn participants(dialog: &[Utterance]) -> Vec<Participant> {
     let names = crate::names::find(dialog);
@@ -125,6 +224,7 @@ pub fn participants(dialog: &[Utterance]) -> Vec<Participant> {
             speaker,
             voice,
             name: names.get(&(speaker, voice)).cloned(),
+            given: None,
             label,
         })
         .collect()
@@ -305,18 +405,21 @@ mod tests {
                 speaker: Speaker::Others,
                 voice: Some(1),
                 name: None,
+                given: None,
                 label: "Participant 1".into(),
             },
             Participant {
                 speaker: Speaker::Others,
                 voice: Some(2),
                 name: Some("Катя".into()),
+                given: None,
                 label: "Катя".into(),
             },
             Participant {
                 speaker: Speaker::Me,
                 voice: None,
                 name: None,
+                given: None,
                 label: "Participant 2".into(),
             },
         ];
@@ -332,6 +435,43 @@ mod tests {
             "{t}"
         );
         assert!(srt(&d).contains("Катя: Привіт."));
+    }
+
+    #[test]
+    fn a_participant_can_be_renamed_and_back() {
+        let mut d = doc();
+        d.participants = participants(&d.utterances);
+        let auto = d.label(Speaker::Me, None);
+        assert!(d.rename(Speaker::Me, None, "  Григорій \n Гапонюк "));
+        assert_eq!(d.label(Speaker::Me, None), "Григорій Гапонюк");
+        assert!(txt(&d).contains("Григорій Гапонюк: Добрий день."), "{}", txt(&d));
+        let p = d.participants.iter().find(|p| p.speaker == Speaker::Me).unwrap();
+        assert_eq!(p.given.as_deref(), Some("Григорій Гапонюк"));
+        // Empty: the automatic label again.
+        assert!(d.rename(Speaker::Me, None, " "));
+        assert_eq!(d.label(Speaker::Me, None), auto);
+        assert!(d.participants.iter().all(|p| p.given.is_none()));
+        // Long names are cut; nobody with this voice: refused.
+        assert!(d.rename(Speaker::Others, None, &"я".repeat(200)));
+        assert_eq!(d.label(Speaker::Others, None).chars().count(), NAME_MAX_CHARS);
+        assert!(!d.rename(Speaker::Others, Some(7), "Х"));
+    }
+
+    #[test]
+    fn renaming_writes_all_three_files() {
+        let dir = std::env::temp_dir().join(format!("mr-rename-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // A transcript made before names: no participants yet.
+        write_all(&dir, &doc()).unwrap();
+        rename_participant(&dir, Speaker::Others, None, "Катя").unwrap();
+        let back: Document =
+            serde_json::from_slice(&fs::read(dir.join(JSON_FILE)).unwrap()).unwrap();
+        assert_eq!(back.label(Speaker::Others, None), "Катя");
+        assert_ne!(back.label(Speaker::Me, None), "Катя", "the other keeps its own");
+        assert!(fs::read_to_string(dir.join(TXT_FILE)).unwrap().contains("Катя: Привіт."));
+        assert!(fs::read_to_string(dir.join(SRT_FILE)).unwrap().contains("Катя: Привіт."));
+        assert!(rename_participant(&dir, Speaker::Others, Some(3), "X").is_err());
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

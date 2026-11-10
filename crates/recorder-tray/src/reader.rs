@@ -34,6 +34,17 @@ const TIME_W: f32 = 64.0;
 pub struct Person {
     pub label: String,
     pub color: Color32,
+    /// Channel and voice, which identify them in `transcript.json`.
+    pub key: (Speaker, Option<u32>),
+}
+
+/// A participant's name being edited in the participants line.
+pub struct PersonEdit {
+    pub key: (Speaker, Option<u32>),
+    pub text: String,
+    /// The label before (the field's hint).
+    pub was: String,
+    focus: bool,
 }
 
 pub struct Line {
@@ -72,6 +83,12 @@ impl Reader {
             self.query.clear();
             self.refresh();
         }
+    }
+
+    /// Reads the transcript again now (after it was changed here).
+    pub fn reload(&mut self) {
+        self.modified = None;
+        self.refresh();
     }
 
     /// Re-reads the transcript when its file changed on disk.
@@ -126,6 +143,7 @@ fn load(path: &Path) -> Result<Transcript, String> {
             Person {
                 label: doc.label(speaker, voice),
                 color,
+                key: (speaker, voice),
             }
         })
         .collect();
@@ -197,22 +215,116 @@ fn text_job(line: &Line, found: &[(usize, usize)], width: f32) -> LayoutJob {
 }
 
 /// Everyone in the call, in one quiet line: "Participants  Григорій ·
-/// Катя · Роман".
-pub fn people(ui: &mut egui::Ui, t: &Transcript) {
-    let names: Vec<&str> = t.people.iter().map(|p| p.label.as_str()).collect();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = ui::S2;
+/// Катя · Роман". A click on a name opens a field to rename them (when
+/// `editable`); returns the participant and name to save.
+pub fn people(
+    ui: &mut egui::Ui,
+    t: &Transcript,
+    edit: &mut Option<PersonEdit>,
+    editable: bool,
+) -> Option<((Speaker, Option<u32>), String)> {
+    let caption = |ui: &mut egui::Ui| {
         ui.label(
             RichText::new("Participants")
                 .font(FontId::new(13.0, ui::medium()))
                 .color(ui::INK_MUTED),
         );
-        ui.label(
-            RichText::new(names.join("  ·  "))
-                .size(13.5)
-                .color(ui::INK_SECONDARY),
-        );
+    };
+    if let Some(e) = edit.as_mut() {
+        let (mut save, mut cancel) = (false, false);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = ui::S2;
+            caption(ui);
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut e.text)
+                    .hint_text(e.was.as_str())
+                    .char_limit(recorder_transcribe::output::NAME_MAX_CHARS)
+                    .desired_width(220.0)
+                    .margin(vec2(8.0, 5.0)),
+            );
+            if e.focus {
+                field.request_focus();
+                e.focus = false;
+            }
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                save = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                cancel = true;
+            }
+            save |= ui::primary_small(ui, "Save").clicked();
+            cancel |= ui::outline_small(ui, "Cancel", None).clicked();
+        });
+        ui.label(ui::muted(
+            "Renames them in the whole transcript and its files. Leave empty for the \
+             name found in the call.",
+        ));
+        if cancel {
+            *edit = None;
+        } else if save && let Some(e) = edit.take() {
+            return Some((e.key, e.text));
+        }
+        return None;
+    }
+    let mut start = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = ui::S2;
+        caption(ui);
+        for (i, p) in t.people.iter().enumerate() {
+            if i > 0 {
+                ui.label(RichText::new("·").size(13.5).color(ui::INK_MUTED));
+            }
+            let name = egui::Label::new(
+                RichText::new(&p.label)
+                    .size(13.5)
+                    .color(ui::INK_SECONDARY),
+            )
+            .selectable(false);
+            if editable {
+                let r = ui
+                    .add(name.sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Rename");
+                if r.hovered() {
+                    // Underline the name under the pointer.
+                    let y = r.rect.bottom() - 1.0;
+                    ui.painter().line_segment(
+                        [egui::pos2(r.rect.left(), y), egui::pos2(r.rect.right(), y)],
+                        egui::Stroke::new(1.0_f32, ui::INK_SECONDARY),
+                    );
+                }
+                if r.clicked() {
+                    start = Some(p);
+                }
+            } else {
+                ui.add(name);
+            }
+        }
     });
+    if let Some(p) = start {
+        *edit = Some(PersonEdit::of(p));
+    }
+    None
+}
+
+impl PersonEdit {
+    /// The field for `p`, with their name in it to correct (empty for
+    /// "Participant 2").
+    pub fn of(p: &Person) -> Self {
+        let automatic = p.label.starts_with("Participant ")
+            || p.label == Speaker::Me.label()
+            || p.label.starts_with(Speaker::Others.label());
+        Self {
+            key: p.key,
+            text: if automatic {
+                String::new()
+            } else {
+                p.label.clone()
+            },
+            was: p.label.clone(),
+            focus: true,
+        }
+    }
 }
 
 /// The dialogue as plain text, as in transcript.txt (for Copy all).

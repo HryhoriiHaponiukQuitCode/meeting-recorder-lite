@@ -142,6 +142,9 @@ struct DevOptions {
     find: Option<String>,
     /// `--rename <text>`: the shown recording's name field, open with this.
     rename: Option<String>,
+    /// `--edit-person <n>`: the name field of the shown transcript's n-th
+    /// participant (from 1).
+    edit_person: Option<usize>,
 }
 
 struct App {
@@ -190,6 +193,8 @@ struct App {
     reader: reader::Reader,
     shown: Option<SessionInfo>,
     renaming: Option<Renaming>,
+    /// A participant being renamed in the shown transcript.
+    person_edit: Option<reader::PersonEdit>,
     /// The last recording's name, if it was given one.
     last_title: Option<String>,
 }
@@ -247,6 +252,7 @@ impl App {
             reader: reader::Reader::default(),
             shown: None,
             renaming: None,
+            person_edit: None,
             last_title: None,
             settings,
         };
@@ -254,6 +260,9 @@ impl App {
         app.reader.select(dev.show.clone());
         if let Some(q) = dev.find {
             app.reader.query = q;
+        }
+        if let (Some(n), Some(Ok(t))) = (dev.edit_person, &app.reader.transcript) {
+            app.person_edit = t.people.get(n.saturating_sub(1)).map(reader::PersonEdit::of);
         }
         if let (Some(dir), Some(text)) = (dev.show.clone(), dev.rename) {
             app.renaming = Some(Renaming {
@@ -1079,6 +1088,9 @@ impl App {
                 if self.renaming.as_ref().is_some_and(|r| r.dir != dir) {
                     self.renaming = None;
                 }
+                if self.reader.dir() != Some(dir.as_path()) {
+                    self.person_edit = None;
+                }
                 self.reader.select(Some(dir));
                 self.go(View::Recordings);
             }
@@ -1593,6 +1605,7 @@ impl App {
                 });
             }
             ui.add_space(ui::S3);
+            let mut rename_person = None;
             let job = self.job_progress(&info.dir);
             let queued = self.queue.contains(&info.dir);
             match (&self.reader.transcript, job) {
@@ -1605,7 +1618,7 @@ impl App {
                     ));
                 }
                 (Some(Ok(t)), None) if matches!(info.transcript, TranscriptState::Done(_)) => {
-                    reader::people(ui, t);
+                    rename_person = reader::people(ui, t, &mut self.person_edit, true);
                     ui.add_space(ui::S2);
                     reader::search(ui, &mut self.reader.query, t);
                     ui.add_space(ui::S2);
@@ -1654,9 +1667,31 @@ impl App {
                     ),
                 },
             }
+            if let Some(((speaker, voice), name)) = rename_person {
+                self.rename_person(&info.dir, speaker, voice, &name);
+            }
         });
         if let Some(a) = action {
             self.apply(a);
+        }
+    }
+
+    /// Renames a participant in the transcript files and shows it at once.
+    fn rename_person(
+        &mut self,
+        dir: &Path,
+        speaker: recorder_transcribe::Speaker,
+        voice: Option<u32>,
+        name: &str,
+    ) {
+        match recorder_transcribe::output::rename_participant(dir, speaker, voice, name) {
+            Ok(()) => self.reader.reload(),
+            Err(e) => {
+                self.message = Some(Message {
+                    text: format!("Cannot rename the participant: {e}"),
+                    problem: true,
+                });
+            }
         }
     }
 
@@ -2308,6 +2343,7 @@ fn dev_options() -> DevOptions {
         show: value("--show").map(PathBuf::from),
         find: value("--find"),
         rename: value("--rename"),
+        edit_person: value("--edit-person").and_then(|v| v.parse().ok()),
     }
 }
 
