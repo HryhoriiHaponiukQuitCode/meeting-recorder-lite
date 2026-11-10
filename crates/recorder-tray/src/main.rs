@@ -1900,8 +1900,7 @@ impl App {
             ui.add_space(ui::S1);
             if outdated {
                 ui.label(ui::muted(
-                    "A more accurate speech model: about half the mistakes, and no lost \
-                     sentences in English. It replaces the old one.",
+                    "A more accurate speech model (Parakeet Ultra). It replaces the old one.",
                 ));
             }
             ui.label(ui::muted(match quality {

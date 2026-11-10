@@ -179,12 +179,14 @@ SOFTWARE.
 
 ### Speech models (downloaded on first use, not in the installer)
 
-- **NVIDIA Parakeet TDT 0.6B v3**
+- **Moondream Parakeet Ultra** (https://huggingface.co/moondream/parakeet-ultra),
+  © Moondream, licensed under CC-BY-4.0
+  (https://creativecommons.org/licenses/by/4.0/); a post-training of
+  **NVIDIA Parakeet TDT 0.6B v3**
   (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), © NVIDIA
-  Corporation, licensed under CC-BY-4.0
-  (https://creativecommons.org/licenses/by/4.0/). Used as the ONNX export
-  `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3` by the sherpa-onnx project
-  (https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3;
+  Corporation, CC-BY-4.0. Used as the ONNX export
+  `sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra` by the sherpa-onnx project
+  (https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra;
   converted; no other changes).
 - **OpenAI Whisper large-v3-turbo** (https://github.com/openai/whisper),
   MIT, © 2022 OpenAI. macOS “Best” quality only. Used as

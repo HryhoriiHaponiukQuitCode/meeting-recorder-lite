@@ -47,7 +47,7 @@ pub struct TranscriptInfo {
     pub updated_at_utc: DateTime<Utc>,
     /// e.g. `sherpa-onnx 1.13.8`.
     pub engine: String,
-    /// e.g. `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3`.
+    /// e.g. `sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra`.
     pub model: String,
     /// Output files in the session folder (`transcript.txt`, ...).
     #[serde(default)]

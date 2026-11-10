@@ -4,8 +4,8 @@
 //! ```sh
 //! MR_MODEL_DIR=.../models \
 //! MR_TEST_EN_WAV=.../english-source.wav MR_TEST_EN_REF=.../english-reference.txt \
-//! MR_TEST_EN_GOLDEN=.../en-rust-fp32-pad.txt \
-//! MR_TEST_UA_WAV=.../voice-114619.wav MR_TEST_UA_GOLDEN=.../uk-rust-fp32-pad.txt \
+//! MR_TEST_EN_GOLDEN=.../en-rust-ultra-pad.txt \
+//! MR_TEST_UA_WAV=.../voice-114619.wav MR_TEST_UA_GOLDEN=.../uk-rust-ultra-pad.txt \
 //! cargo test --release -p recorder-transcriber -- --ignored --test-threads 1
 //! ```
 //!
