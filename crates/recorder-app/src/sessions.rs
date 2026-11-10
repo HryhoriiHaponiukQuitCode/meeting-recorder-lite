@@ -1,10 +1,12 @@
 //! The recordings in the recordings folder, newest first, for the list in
-//! the window.
+//! the window, and the names the user gives them.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use recorder_core::manifest::{Manifest, Status};
+use recorder_core::manifest::{self, Manifest, Status};
 
 use crate::transcription::{TranscriptState, transcript_state_of};
 
@@ -20,6 +22,9 @@ pub struct SessionInfo {
     /// or moved by hand).
     pub audio_missing: bool,
     pub transcript: TranscriptState,
+    /// The name the user gave it ([`set_title`]); otherwise it is shown by
+    /// its date.
+    pub title: Option<String>,
 }
 
 impl SessionInfo {
@@ -31,6 +36,7 @@ impl SessionInfo {
             audio_missing: !m.parts.is_empty()
                 && !m.parts.iter().any(|p| dir.join(&p.file).is_file()),
             transcript: transcript_state_of(m, &dir),
+            title: title(&dir),
             dir,
         }
     }
@@ -42,6 +48,54 @@ impl SessionInfo {
 }
 
 /// Every folder in `root` with a readable `manifest.json`, newest first.
+/// The user's name for a recording, one line in the recording's folder. Not
+/// in `manifest.json`: the recorder and the transcriber rewrite the manifest
+/// while they work and would drop a name given meanwhile. The folder keeps
+/// its name (the start time), which orders the list.
+pub const TITLE_FILE: &str = "title.txt";
+/// Longer names are cut.
+pub const TITLE_MAX_CHARS: usize = 120;
+
+/// One line, spaces collapsed, at most [`TITLE_MAX_CHARS`].
+pub fn clean_title(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(TITLE_MAX_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The recording's name, if it was given one.
+pub fn title(dir: &Path) -> Option<String> {
+    let t = clean_title(&fs::read_to_string(dir.join(TITLE_FILE)).ok()?);
+    (!t.is_empty()).then_some(t)
+}
+
+/// Names the recording in `dir`; an empty name removes the name (the date
+/// shows again).
+pub fn set_title(dir: &Path, name: &str) -> io::Result<()> {
+    if !dir.join(manifest::FILE_NAME).is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the recording is not there any more",
+        ));
+    }
+    let name = clean_title(name);
+    let path = dir.join(TITLE_FILE);
+    if name.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            r => r,
+        };
+    }
+    let tmp = dir.join(format!("{TITLE_FILE}.tmp"));
+    fs::write(&tmp, format!("{name}\n"))?;
+    fs::rename(&tmp, &path)
+}
+
 pub fn list(root: &Path) -> Vec<SessionInfo> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -134,6 +188,32 @@ mod tests {
             });
         }
         m.save(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_recording_keeps_the_name_it_was_given() {
+        let root = std::env::temp_dir().join(format!("mr-titles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        session(&root, "call", 5, Status::Completed, 60_000);
+        let dir = root.join("call");
+        assert_eq!(info(&dir).unwrap().title, None);
+        set_title(&dir, "  Планування\n спринту  ").unwrap();
+        assert_eq!(title(&dir).as_deref(), Some("Планування спринту"));
+        assert_eq!(info(&dir).unwrap().title.as_deref(), Some("Планування спринту"));
+        assert_eq!(list(&root)[0].title.as_deref(), Some("Планування спринту"));
+        // The manifest is rewritten (the transcriber does that): the name stays.
+        Manifest::load(&dir).unwrap().save(&dir).unwrap();
+        assert_eq!(title(&dir).as_deref(), Some("Планування спринту"));
+        // Long names are cut; an empty one brings the date back.
+        set_title(&dir, &"я".repeat(500)).unwrap();
+        assert_eq!(title(&dir).unwrap().chars().count(), TITLE_MAX_CHARS);
+        set_title(&dir, "   ").unwrap();
+        assert_eq!(title(&dir), None);
+        assert!(!dir.join(TITLE_FILE).exists());
+        set_title(&dir, "").unwrap();
+        // Not a recording: refused.
+        assert!(set_title(&root.join("missing"), "x").is_err());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -310,6 +310,8 @@ pub enum Icon {
     Speaker,
     Alert,
     Info,
+    /// Rename.
+    Pencil,
 }
 
 /// Icons are drawn, not taken from a font, so they look the same with every
@@ -367,6 +369,16 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
                 painter.circle_filled(c + vec2(-6.0, dy), 1.6, color);
                 line(vec2(-2.5, dy), vec2(7.0, dy));
             }
+        }
+        Icon::Pencil => {
+            // A pencil slanted up to the right: tip at the lower left.
+            let d = vec2(1.0, -1.0) / 2.0_f32.sqrt();
+            let n = vec2(1.0, 1.0) / 2.0_f32.sqrt() * 2.3;
+            let tip = c + vec2(-6.0, 6.0);
+            let (a, b) = (tip + d * 3.5, tip + d * 14.5);
+            painter.add(Shape::closed_line(vec![tip, a + n, b + n, b - n, a - n], stroke));
+            let cap = b - d * 3.0;
+            painter.line_segment([cap + n, cap - n], stroke);
         }
         Icon::Folder => {
             let body = Rect::from_center_size(c + vec2(0.0, 1.0), vec2(15.0, 11.0));
@@ -536,6 +548,18 @@ pub fn primary(
         icon: Color32::WHITE,
     };
     icon_button_with_text(ui, text, leading, trailing, look, Size::of(full_width))
+}
+
+/// A compact blue action (next to [`outline_small`]).
+pub fn primary_small(ui: &mut Ui, text: &str) -> Response {
+    let look = ButtonLook {
+        fill: BLUE,
+        hover: BLUE_HOVER,
+        border: None,
+        text: Color32::WHITE,
+        icon: Color32::WHITE,
+    };
+    icon_button_with_text(ui, text, None, None, look, Size::Small)
 }
 
 /// The white outlined action, with an optional coloured icon.

@@ -95,6 +95,14 @@ struct LastRecording {
     seconds: u64,
 }
 
+/// A recording's name being edited in the transcript pane.
+struct Renaming {
+    dir: PathBuf,
+    text: String,
+    /// Put the cursor in the field on the next frame.
+    focus: bool,
+}
+
 enum TranscriptAction {
     Start(PathBuf),
     Stop,
@@ -132,6 +140,8 @@ struct DevOptions {
     /// pane shows (screenshots).
     show: Option<PathBuf>,
     find: Option<String>,
+    /// `--rename <text>`: the shown recording's name field, open with this.
+    rename: Option<String>,
 }
 
 struct App {
@@ -179,6 +189,9 @@ struct App {
     /// The recording whose transcript is on the right, and its state.
     reader: reader::Reader,
     shown: Option<SessionInfo>,
+    renaming: Option<Renaming>,
+    /// The last recording's name, if it was given one.
+    last_title: Option<String>,
 }
 
 impl App {
@@ -233,12 +246,21 @@ impl App {
             disk_checked: Instant::now(),
             reader: reader::Reader::default(),
             shown: None,
+            renaming: None,
+            last_title: None,
             settings,
         };
         // Nothing is opened at start; the user picks a recording.
         app.reader.select(dev.show.clone());
         if let Some(q) = dev.find {
             app.reader.query = q;
+        }
+        if let (Some(dir), Some(text)) = (dev.show.clone(), dev.rename) {
+            app.renaming = Some(Renaming {
+                dir,
+                text,
+                focus: true,
+            });
         }
         app.check_disk();
         // First launch: ask for everything right away, so the system prompts
@@ -542,6 +564,7 @@ impl App {
         self.last_transcript = self.last.as_ref().map_or(TranscriptState::None, |l| {
             transcription::transcript_state(&l.dir)
         });
+        self.last_title = self.last.as_ref().and_then(|l| sessions::title(&l.dir));
         // The list reads every manifest, so only while it is on screen.
         if self.view == View::Recordings {
             let (list, total) = sessions::page(&self.settings.recordings_dir(), 0, self.loaded);
@@ -990,13 +1013,30 @@ impl App {
             ui::card_header(ui, "Last recording", |ui| {
                 ui::pill(ui, "Saved", ui::Tone::Green, false);
             });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(when(last.started)).color(ui::INK));
-                ui.label(
-                    RichText::new(format!("· {}", duration_words(last.seconds)))
-                        .color(ui::INK_MUTED),
-                );
-            });
+            match &self.last_title {
+                // A name can be long: on its own line, cut to the card.
+                Some(t) => {
+                    ui.add(
+                        egui::Label::new(RichText::new(t).color(ui::INK))
+                            .truncate()
+                            .selectable(false),
+                    );
+                    ui.label(ui::muted(format!(
+                        "{} · {}",
+                        when(last.started),
+                        duration_words(last.seconds)
+                    )));
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(when(last.started)).color(ui::INK));
+                        ui.label(
+                            RichText::new(format!("· {}", duration_words(last.seconds)))
+                                .color(ui::INK_MUTED),
+                        );
+                    });
+                }
+            }
             ui.add_space(ui::S2);
             ui.horizontal(|ui| {
                 if ui::outline(ui, REVEAL, Some((ui::Icon::Folder, ui::BLUE)), false).clicked() {
@@ -1036,6 +1076,9 @@ impl App {
             TranscriptAction::Unqueue(dir) => self.queue.retain(|d| *d != dir),
             TranscriptAction::Open(path) => paths::open_file(&path),
             TranscriptAction::View(dir) => {
+                if self.renaming.as_ref().is_some_and(|r| r.dir != dir) {
+                    self.renaming = None;
+                }
                 self.reader.select(Some(dir));
                 self.go(View::Recordings);
             }
@@ -1272,25 +1315,46 @@ impl App {
                 .max_rect(rect)
                 .layout(Layout::top_down(Align::Min)),
         );
+        // Room for what shows on the right; long names are cut before it.
+        let near = inner.rect_contains_pointer(rect) || selected;
+        let done = matches!(s.transcript, TranscriptState::Done(_));
+        let controls = s.recording || (s.transcribable() && (!done || busy || queued));
+        let reserve = if near && !busy && !queued { 44.0 } else { 0.0 }
+            + if controls { 120.0 } else { 0.0 };
         inner.horizontal(|ui| {
             ui.set_min_height(52.0);
             ui.vertical(|ui| {
+                ui.set_max_width((rect.width() - reserve - ui::S2).max(100.0));
                 ui.add_space(ui::S2);
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(
-                    RichText::new(when(s.started))
-                        .font(FontId::new(14.0, ui::medium()))
-                        .color(if selected { ui::BLUE } else { ui::INK }),
+                let (name, sub) = match &s.title {
+                    Some(t) => (
+                        t.clone(),
+                        format!(
+                            "{} · {} · {state}",
+                            when(s.started),
+                            duration_words(s.seconds)
+                        ),
+                    ),
+                    None => (
+                        when(s.started),
+                        format!("{} · {state}", duration_words(s.seconds)),
+                    ),
+                };
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(name)
+                            .font(FontId::new(14.0, ui::medium()))
+                            .color(if selected { ui::BLUE } else { ui::INK }),
+                    )
+                    .truncate()
+                    .selectable(false),
                 );
-                ui.label(ui::muted(format!(
-                    "{} · {state}",
-                    duration_words(s.seconds)
-                )));
+                ui.add(egui::Label::new(ui::muted(sub)).truncate().selectable(false));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // The folder button only on the row under the pointer or the
                 // shown one, so the list stays quiet.
-                let near = ui.rect_contains_pointer(rect) || selected;
                 if near
                     && !busy
                     && !queued
@@ -1298,7 +1362,6 @@ impl App {
                 {
                     action = Some(TranscriptAction::Reveal(s.dir.clone()));
                 }
-                let done = matches!(s.transcript, TranscriptState::Done(_));
                 if s.recording {
                     ui::pill(ui, "Recording", ui::Tone::Red, true);
                 } else if s.transcribable() && (!done || busy || queued) {
@@ -1355,6 +1418,83 @@ impl App {
 
     /// The right side: the transcript of the selected recording, or what
     /// stands in for it (transcribing, not yet, failed, nothing selected).
+    fn start_renaming(&mut self, info: &SessionInfo) {
+        self.renaming = Some(Renaming {
+            dir: info.dir.clone(),
+            text: info.title.clone().unwrap_or_default(),
+            focus: true,
+        });
+    }
+
+    /// The name field in place of the title: Enter or Save keeps it, Esc or
+    /// Cancel drops the change; an empty name shows the date again.
+    fn rename_row(&mut self, ui: &mut egui::Ui, info: &SessionInfo) {
+        let Some(r) = self.renaming.as_mut() else {
+            return;
+        };
+        let (mut save, mut cancel) = (false, false);
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                save = ui::primary_small(ui, "Save").clicked();
+                cancel = ui::outline_small(ui, "Cancel", None).clicked();
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut r.text)
+                            .hint_text(when(info.started))
+                            .char_limit(sessions::TITLE_MAX_CHARS)
+                            .font(FontId::new(17.0, ui::medium()))
+                            .desired_width(ui.available_width() - ui::S2)
+                            .margin(vec2(10.0, 7.0)),
+                    );
+                    if r.focus {
+                        field.request_focus();
+                        r.focus = false;
+                    }
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        save = true;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+        ui.add_space(2.0);
+        ui.label(ui::muted(format!(
+            "{} · {} · leave empty to show the date",
+            when(info.started),
+            duration_words(info.seconds)
+        )));
+        if cancel {
+            self.renaming = None;
+        } else if save && let Some(r) = self.renaming.take() {
+            self.save_title(&r.dir, &r.text);
+        }
+    }
+
+    /// Names a recording and shows the name everywhere at once.
+    fn save_title(&mut self, dir: &Path, name: &str) {
+        if let Err(e) = sessions::set_title(dir, name) {
+            self.message = Some(Message {
+                text: format!("Cannot rename the recording: {e}"),
+                problem: true,
+            });
+            return;
+        }
+        let title = sessions::title(dir);
+        for s in self
+            .sessions
+            .iter_mut()
+            .chain(self.shown.as_mut())
+            .filter(|s| s.dir == dir)
+        {
+            s.title = title.clone();
+        }
+        if self.last.as_ref().is_some_and(|l| l.dir == dir) {
+            self.last_title = title;
+        }
+    }
+
     fn transcript_pane(&mut self, ui: &mut egui::Ui) {
         let mut action = None;
         ui::card_frame().show(ui, |ui| {
@@ -1375,52 +1515,83 @@ impl App {
                 }
                 return;
             };
-            // Title row: when, how long, and what can be done with it.
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(
-                        RichText::new(when(info.started))
-                            .font(FontId::new(19.0, ui::bold()))
-                            .color(ui::INK),
-                    );
-                    ui.label(ui::muted(duration_words(info.seconds)));
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
-                        action = Some(TranscriptAction::Reveal(info.dir.clone()));
-                    }
-                    let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
-                        || self.queue.contains(&info.dir);
-                    match (&info.transcript, busy) {
-                        (TranscriptState::Done(txt), false) => {
-                            if ui::outline_small(ui, "Open file", None)
-                                .on_hover_text("transcript.txt in your text editor")
-                                .clicked()
-                            {
-                                action = Some(TranscriptAction::Open(txt.clone()));
-                            }
-                            if ui::outline_small(ui, "Copy all", None).clicked()
-                                && let Some(Ok(t)) = &self.reader.transcript
-                            {
-                                ui.ctx().copy_text(reader::plain_text(t));
-                                self.message = Some(Message {
-                                    text: "The transcript is copied.".into(),
-                                    problem: false,
-                                });
-                            }
+            // Title row: its name (or when), how long, and what can be done
+            // with it. The buttons first, so a long name is cut before them.
+            if self.renaming.as_ref().is_some_and(|r| r.dir == info.dir) {
+                self.rename_row(ui, &info);
+            } else {
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
+                            action = Some(TranscriptAction::Reveal(info.dir.clone()));
                         }
-                        _ if info.transcribable() => {
-                            if let Some(a) =
-                                self.transcript_controls(ui, &info.dir, &info.transcript)
-                            {
-                                action = Some(a);
-                            }
+                        if ui::icon_button(ui, ui::Icon::Pencil, "Rename").clicked() {
+                            self.start_renaming(&info);
                         }
-                        _ => {}
-                    }
+                        let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
+                            || self.queue.contains(&info.dir);
+                        match (&info.transcript, busy) {
+                            (TranscriptState::Done(txt), false) => {
+                                if ui::outline_small(ui, "Open file", None)
+                                    .on_hover_text("transcript.txt in your text editor")
+                                    .clicked()
+                                {
+                                    action = Some(TranscriptAction::Open(txt.clone()));
+                                }
+                                if ui::outline_small(ui, "Copy all", None).clicked()
+                                    && let Some(Ok(t)) = &self.reader.transcript
+                                {
+                                    ui.ctx().copy_text(reader::plain_text(t));
+                                    self.message = Some(Message {
+                                        text: "The transcript is copied.".into(),
+                                        problem: false,
+                                    });
+                                }
+                            }
+                            _ if info.transcribable() => {
+                                if let Some(a) =
+                                    self.transcript_controls(ui, &info.dir, &info.transcript)
+                                {
+                                    action = Some(a);
+                                }
+                            }
+                            _ => {}
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                let (name, sub) = match &info.title {
+                                    Some(t) => (
+                                        t.clone(),
+                                        format!(
+                                            "{} · {}",
+                                            when(info.started),
+                                            duration_words(info.seconds)
+                                        ),
+                                    ),
+                                    None => (when(info.started), duration_words(info.seconds)),
+                                };
+                                let title = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(name)
+                                                .font(FontId::new(19.0, ui::bold()))
+                                                .color(ui::INK),
+                                        )
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::Text);
+                                if title.double_clicked() {
+                                    self.start_renaming(&info);
+                                }
+                                ui.label(ui::muted(sub));
+                            });
+                        });
+                    });
                 });
-            });
+            }
             ui.add_space(ui::S3);
             let job = self.job_progress(&info.dir);
             let queued = self.queue.contains(&info.dir);
@@ -2136,6 +2307,7 @@ fn dev_options() -> DevOptions {
         transcribe: args.iter().any(|a| a == "--transcribe"),
         show: value("--show").map(PathBuf::from),
         find: value("--find"),
+        rename: value("--rename"),
     }
 }
 
