@@ -227,6 +227,7 @@ fn transcribe_opts(
         quality,
         voices,
         heat_report: None,
+        me_name: None,
     };
     pipeline::transcribe_session(dir, &opts, &mut |m| on(&m), stop)
 }

@@ -136,17 +136,9 @@ impl Document {
         {
             return false;
         }
-        let name: String = name
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(NAME_MAX_CHARS)
-            .collect::<String>()
-            .trim_end()
-            .to_string();
+        let name = clean_name(name);
         // The automatic label, as the transcriber made it.
-        let found = participants(&self.utterances)
+        let found = participants(&self.utterances, None)
             .into_iter()
             .find(|p| p.speaker == speaker && p.voice == voice);
         let i = match self
@@ -159,7 +151,7 @@ impl Document {
                 // Transcripts made before names: every participant gets an
                 // entry, so the others keep their labels.
                 if self.participants.is_empty() {
-                    self.participants = participants(&self.utterances);
+                    self.participants = participants(&self.utterances, None);
                 }
                 match self
                     .participants
@@ -216,18 +208,40 @@ pub fn rename_participant(
 }
 
 /// Participants of a dialogue with their labels (names where found).
-pub fn participants(dialog: &[Utterance]) -> Vec<Participant> {
-    let names = crate::names::find(dialog);
-    crate::names::labels(dialog, &names)
+///
+/// The microphone is the user: their name is `me` (from the settings),
+/// never one guessed from the call. Guesses for it were mostly someone the
+/// user talked about ("асайнила Андрія" made the user Андрій).
+pub fn participants(dialog: &[Utterance], me: Option<&str>) -> Vec<Participant> {
+    let mut names = crate::names::find(dialog);
+    names.retain(|(speaker, _), _| *speaker != crate::Speaker::Me);
+    let me = me.map(clean_name).filter(|n| !n.is_empty());
+    let mut labels_from = names.clone();
+    if let Some(n) = &me {
+        labels_from.insert((crate::Speaker::Me, None), n.clone());
+    }
+    crate::names::labels(dialog, &labels_from)
         .into_iter()
         .map(|((speaker, voice), label)| Participant {
             speaker,
             voice,
             name: names.get(&(speaker, voice)).cloned(),
-            given: None,
+            given: (speaker == crate::Speaker::Me).then(|| me.clone()).flatten(),
             label,
         })
         .collect()
+}
+
+/// One line, spaces collapsed, at most [`NAME_MAX_CHARS`].
+fn clean_name(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(NAME_MAX_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -438,9 +452,26 @@ mod tests {
     }
 
     #[test]
+    fn the_microphone_takes_the_users_name_never_a_guess() {
+        let mut d = doc();
+        // "Others" says "Андрію": a guess would make the user Андрій.
+        d.utterances[0].text = "Андрію, привіт.".into();
+        d.utterances[1].text = "Привіт, Андрію.".into();
+        let p = participants(&d.utterances, None);
+        let me = p.iter().find(|p| p.speaker == Speaker::Me).unwrap();
+        assert_eq!((me.name.as_deref(), me.given.as_deref()), (None, None));
+        assert!(me.label.starts_with("Participant "), "{me:?}");
+        let p = participants(&d.utterances, Some("  Григорій "));
+        let me = p.iter().find(|p| p.speaker == Speaker::Me).unwrap();
+        assert_eq!(me.label, "Григорій");
+        assert_eq!(me.given.as_deref(), Some("Григорій"));
+        assert!(participants(&d.utterances, Some(" ")).iter().all(|p| p.given.is_none()));
+    }
+
+    #[test]
     fn a_participant_can_be_renamed_and_back() {
         let mut d = doc();
-        d.participants = participants(&d.utterances);
+        d.participants = participants(&d.utterances, None);
         let auto = d.label(Speaker::Me, None);
         assert!(d.rename(Speaker::Me, None, "  Григорій \n Гапонюк "));
         assert_eq!(d.label(Speaker::Me, None), "Григорій Гапонюк");

@@ -28,6 +28,9 @@ pub struct Settings {
     pub tell_voices_apart: bool,
     /// `None` = the default models folder.
     pub models_dir: Option<PathBuf>,
+    /// The user's name, shown for their microphone in transcripts (empty:
+    /// "Participant N").
+    pub your_name: String,
 }
 
 impl Default for Settings {
@@ -43,6 +46,7 @@ impl Default for Settings {
             transcription_quality: recorder_transcribe::model::Quality::default_for_this_system(),
             tell_voices_apart: true,
             models_dir: None,
+            your_name: String::new(),
         }
     }
 }

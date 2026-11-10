@@ -185,6 +185,7 @@ impl TranscriptionJob {
         threads: u32,
         quality: Quality,
         voices: bool,
+        me_name: Option<&str>,
     ) -> io::Result<Self> {
         let mut cmd = Command::new(helper_path()?);
         cmd.arg("session")
@@ -201,6 +202,9 @@ impl TranscriptionJob {
             .stderr(Stdio::piped());
         if !voices {
             cmd.arg("--no-voices");
+        }
+        if let Some(name) = me_name.map(str::trim).filter(|n| !n.is_empty()) {
+            cmd.arg("--me-name").arg(name);
         }
         #[cfg(windows)]
         {

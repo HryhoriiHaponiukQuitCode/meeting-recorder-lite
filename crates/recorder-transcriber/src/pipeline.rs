@@ -183,6 +183,8 @@ pub struct Options {
     /// Told when the transcriber starts or stops resting because the
     /// computer runs hot.
     pub heat_report: Option<HeatReport>,
+    /// The user's name, for the microphone (none: "Participant N").
+    pub me_name: Option<String>,
 }
 
 fn settings(opts: &Options) -> Settings {
@@ -564,7 +566,7 @@ fn run(
         processing_s: started.elapsed().as_secs_f64(),
         speakers: Speakers::default(),
         others_voices,
-        participants: output::participants(&utterances),
+        participants: output::participants(&utterances, opts.me_name.as_deref()),
         utterances,
     };
     let files = output::write_all(dir, &doc).context("cannot write the transcript")?;
@@ -692,7 +694,14 @@ pub fn relabel_voices(dir: &Path, opts: &Options) -> Result<u32> {
         transcript::group(Speaker::Others, others),
         echo_possible(&manifest),
     );
-    doc.participants = output::participants(&doc.utterances);
+    // The user's name stays (the voices of the others are new).
+    let me = doc
+        .participants
+        .iter()
+        .find(|p| p.speaker == Speaker::Me)
+        .and_then(|p| p.given.clone())
+        .or_else(|| opts.me_name.clone());
+    doc.participants = output::participants(&doc.utterances, me.as_deref());
     output::write_all(dir, &doc).context("cannot write the transcript")?;
     Ok(doc.others_voices)
 }

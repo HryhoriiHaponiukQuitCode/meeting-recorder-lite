@@ -24,6 +24,15 @@
 //!    перегляд!"). Other short runs stay: they are often real words
 //!    Parakeet missed.
 //!
+//! 4. Whisper sometimes falls into writing without punctuation or capitals
+//!    for minutes (after long pauses inside a region). Its words stay, but
+//!    a run of at least [`UNPUNCTUATED_RUN`] of them without punctuation
+//!    takes the punctuation of the Parakeet words it aligns with, and
+//!    capitals after the sentence ends ([`borrow_punctuation`]). Measured
+//!    on two real calls: cutting regions shorter or giving Whisper a
+//!    punctuated prompt fixed the punctuation too, but made the words worse
+//!    (blind judgement, 46 and 40 likelier spots against 69 and 60).
+//!
 //! Whisper runs on [`Region`]s: speech with the pauses inside kept (it is
 //! more complete with natural pauses), cut where the pause is long.
 
@@ -61,6 +70,40 @@ pub const LATIN_SHARE: f64 = 0.7;
 pub const REGION_LATIN_SHARE: f64 = 0.5;
 /// English sentences closer than this form one region.
 pub const EN_JOIN_S: f64 = 3.0;
+/// Latin text is English only with at least this share of English
+/// function words: Parakeet sometimes writes Ukrainian as Polish or
+/// Croatian ("To, якщо możesz, to poszerwit lask", "Dobre, co to gdzie
+/// to?"), which must not replace Whisper's Ukrainian.
+pub const ENGLISH_WORDS_SHARE: f64 = 0.1;
+/// Latin text with at least this share of words in letters English does
+/// not have ("ż", "č") is not English (a name like "Asunción" is fine).
+const FOREIGN_LETTERS_SHARE: f64 = 0.2;
+/// Polish, Czech and Croatian words Parakeet writes for Ukrainian ones;
+/// Latin text without English function words but with one of these is
+/// not English ("Dobre, co to gdzie to?"), without either it is ("Buenos
+/// Aires").
+const SLAVIC_WORDS: &[&str] = &[
+    "co", "gdzie", "jest", "nie", "tak", "się", "że", "jak", "ale", "bo", "ten", "ta", "mam",
+    "może", "dobre", "dobrze", "dobro", "kak", "što", "je", "sam", "da", "ne", "ni", "ono",
+    "ona", "oni", "mi", "ti", "vi", "smo", "ste", "su", "bude", "tu", "tam", "teraz", "już",
+    "jeszcze", "bardzo", "proszę", "dziękuję", "ja", "ty", "wy", "czy", "kiedy",
+];
+/// Common English words that are not also Polish, Czech or Croatian ones
+/// ("to", "a", "i", "no", "co", "do", "na" are).
+const ENGLISH_WORDS: &[&str] = &[
+    "the", "and", "of", "you", "is", "are", "was", "were", "it", "it's", "that", "this", "we",
+    "they", "he", "she", "in", "for", "with", "be", "have", "has", "not", "but", "what", "so",
+    "if", "can", "will", "just", "my", "your", "our", "there", "here", "yes", "okay", "yeah",
+    "right", "about", "at", "from", "or", "an", "me", "know", "think", "like", "get", "would",
+    "should", "could", "i'm", "don't", "let's", "thank", "thanks", "please", "how", "why",
+    "when", "where", "which", "who", "all", "one", "some", "them", "his", "her", "been",
+    "does", "did", "go", "going", "want", "need", "see", "make", "good", "great", "sure",
+    "also", "then", "than", "because", "maybe", "now", "well", "really", "very",
+];
+/// Whisper words in a row without any punctuation that take Parakeet's.
+pub const UNPUNCTUATED_RUN: usize = 12;
+/// Aligned words at least this similar (0..=1) share punctuation.
+const PUNCTUATION_SIMILAR: f64 = 0.5;
 
 pub const SOURCE_WHISPER: &str = "whisper";
 pub const SOURCE_PARAKEET: &str = "parakeet";
@@ -209,6 +252,35 @@ fn is_latin(w: &Word) -> bool {
     w.text.chars().any(|c| c.is_ascii_alphabetic())
 }
 
+/// Latin words that read as English: few words with letters English does
+/// not have ([`FOREIGN_LETTERS_SHARE`]), and enough of its function words
+/// ([`ENGLISH_WORDS_SHARE`]) or none of [`SLAVIC_WORDS`].
+fn looks_english(words: &[Word]) -> bool {
+    let latin: Vec<&Word> = words.iter().filter(|w| is_latin(w)).collect();
+    if latin.is_empty() {
+        return false;
+    }
+    let foreign = latin
+        .iter()
+        .filter(|w| {
+            w.text.chars().any(|c| {
+                c.is_alphabetic() && !c.is_ascii() && !('\u{0400}'..='\u{04ff}').contains(&c)
+            })
+        })
+        .count();
+    let english = latin
+        .iter()
+        .filter(|w| ENGLISH_WORDS.contains(&norm(&w.text).replace('’', "'").as_str()))
+        .count();
+    if foreign as f64 >= FOREIGN_LETTERS_SHARE * latin.len() as f64 {
+        return false;
+    }
+    english as f64 >= ENGLISH_WORDS_SHARE * latin.len() as f64
+        || !latin
+            .iter()
+            .any(|w| SLAVIC_WORDS.contains(&norm(&w.text).as_str()))
+}
+
 fn sentences(words: &[Word]) -> Vec<&[Word]> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -234,7 +306,7 @@ fn english_regions(parakeet: &[Word]) -> Vec<(f64, f64)> {
     let mut out: Vec<(f64, f64)> = Vec::new();
     for s in sentences(parakeet) {
         let latin = s.iter().filter(|w| is_latin(w)).count();
-        if s.len() >= 3 && latin as f64 / s.len() as f64 >= LATIN_SHARE {
+        if s.len() >= 3 && latin as f64 / s.len() as f64 >= LATIN_SHARE && looks_english(s) {
             let (a, b) = (s[0].start, s[s.len() - 1].end);
             match out.last_mut() {
                 Some(r) if a - r.1 <= EN_JOIN_S => r.1 = b,
@@ -256,7 +328,10 @@ fn tagged(w: &Word, source: &str) -> Word {
 /// timeline. The result is in reading order.
 pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
     let latin = parakeet.iter().filter(|w| is_latin(w)).count();
-    if !parakeet.is_empty() && latin as f64 >= REGION_LATIN_SHARE * parakeet.len() as f64 {
+    if !parakeet.is_empty()
+        && latin as f64 >= REGION_LATIN_SHARE * parakeet.len() as f64
+        && looks_english(parakeet)
+    {
         return parakeet
             .iter()
             .map(|w| tagged(w, SOURCE_PARAKEET_EN))
@@ -301,7 +376,14 @@ pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
             (_, Some(j)) => {
                 flush(&mut run, &mut seq, Some(&w[j]));
                 let alone = i.is_none_or(|i| unrelated(i, j));
-                seq.push((tagged(&w[j], SOURCE_WHISPER), alone));
+                let mut word = tagged(&w[j], SOURCE_WHISPER);
+                // Parakeet's times are the reliable ones (Whisper stretches
+                // words over pauses, up to seconds).
+                if let (Some(i), false) = (i, alone) {
+                    word.start = p[i].start;
+                    word.end = p[i].end;
+                }
+                seq.push((word, alone));
             }
             (Some(i), None) => run.push(p[i].clone()),
             (None, None) => {}
@@ -378,7 +460,9 @@ pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
             k = e;
         }
     }
+    let alone: Vec<bool> = seq.iter().map(|(_, a)| *a).collect();
     let mut out: Vec<Word> = seq.into_iter().map(|(w, _)| w).collect();
+    fit_times(&mut out, &alone);
 
     // English regions go in by time (Whisper's words there were removed).
     for &(a, b) in &regions {
@@ -393,7 +477,118 @@ pub fn merge(parakeet: &[Word], whisper: &[Word]) -> Vec<Word> {
         let at = out.iter().position(|w| w.start > a).unwrap_or(out.len());
         out.splice(at..at, block);
     }
+    borrow_punctuation(&mut out, parakeet);
     out
+}
+
+/// Whisper words without a Parakeet counterpart (`alone`) keep their own
+/// times only where those fit between their neighbours and are not
+/// stretched; otherwise a run of them shares the gap between the
+/// neighbours evenly.
+fn fit_times(words: &mut [Word], alone: &[bool]) {
+    const LONGEST_S: f64 = 1.5;
+    let mut k = 0;
+    while k < words.len() {
+        if !alone[k] {
+            k += 1;
+            continue;
+        }
+        let mut e = k;
+        while e < words.len() && alone[e] {
+            e += 1;
+        }
+        let lo = if k > 0 { words[k - 1].end } else { words[k].start };
+        let hi = if e < words.len() {
+            words[e].start
+        } else {
+            words[e - 1].end
+        };
+        let off = words[k..e]
+            .iter()
+            .any(|w| w.start < lo - 0.01 || w.end > hi + 0.01 || w.end - w.start > LONGEST_S);
+        if off && hi > lo {
+            let step = ((hi - lo) / (e - k) as f64).min(LONGEST_S);
+            // Close to the side that has a neighbour (or the start).
+            let base = if k == 0 && e < words.len() {
+                hi - step * (e - k) as f64
+            } else {
+                lo
+            };
+            for (m, w) in words[k..e].iter_mut().enumerate() {
+                w.start = base + step * m as f64;
+                w.end = w.start + step;
+            }
+        }
+        k = e;
+    }
+}
+
+fn has_punctuation(t: &str) -> bool {
+    t.ends_with(['.', ',', '?', '!', '…', ':', ';'])
+}
+
+fn ends_sentence(t: &str) -> bool {
+    t.ends_with(['.', '?', '!', '…'])
+}
+
+/// Long runs of Whisper words without punctuation take it from the Parakeet
+/// words they align with; a word after a sentence end gets a capital. The
+/// words themselves do not change.
+fn borrow_punctuation(words: &mut [Word], parakeet: &[Word]) {
+    let whisper = |w: &Word| w.source.as_deref() == Some(SOURCE_WHISPER);
+    let mut i = 0;
+    while i < words.len() {
+        let mut e = i;
+        while e < words.len() && whisper(&words[e]) && !has_punctuation(&words[e].text) {
+            e += 1;
+        }
+        if e - i < UNPUNCTUATED_RUN {
+            i = e.max(i + 1);
+            continue;
+        }
+        let (a, b) = (words[i].start - 1.0, words[e - 1].end + 1.0);
+        let p: Vec<Word> = parakeet
+            .iter()
+            .filter(|x| a <= x.start && x.start <= b)
+            .cloned()
+            .collect();
+        let run: Vec<Word> = words[i..e].to_vec();
+        // Whether Parakeet starts the sentence with this word (a capital).
+        let mut capital = vec![false; run.len()];
+        for (pi, wj) in align(&p, &run) {
+            let (Some(pi), Some(wj)) = (pi, wj) else {
+                continue;
+            };
+            if similarity(&norm(&p[pi].text), &norm(&run[wj].text)) < PUNCTUATION_SIMILAR {
+                continue;
+            }
+            let tail: String = p[pi]
+                .text
+                .chars()
+                .rev()
+                .take_while(|c| ".,?!…:;".contains(*c))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            words[i + wj].text.push_str(&tail);
+            capital[wj] = p[pi].text.chars().next().is_some_and(char::is_uppercase);
+        }
+        for k in i..e {
+            let after_end = if k == 0 {
+                capital[0]
+            } else {
+                ends_sentence(&words[k - 1].text)
+            };
+            if after_end && let Some(first) = words[k].text.chars().next()
+                && first.is_lowercase()
+            {
+                let rest = &words[k].text[first.len_utf8()..];
+                words[k].text = first.to_uppercase().collect::<String>() + rest;
+            }
+        }
+        i = e;
+    }
 }
 
 #[cfg(test)]
@@ -406,6 +601,77 @@ mod tests {
             .enumerate()
             .map(|(i, x)| Word::new(x, t + i as f64 * 0.3, t + i as f64 * 0.3 + 0.25))
             .collect()
+    }
+
+    #[test]
+    fn a_long_run_without_punctuation_takes_parakeets() {
+        let w = words(
+            "ну там буде видно цю транзакцію чи ні а це комісія за переказ чи якась інша",
+            0.0,
+        );
+        let p = words(
+            "Ну, там буде видно цю транзакцію чи ні? А це комісія за переказ, чи якась інша?",
+            0.0,
+        );
+        let out = merge(&p, &w);
+        assert_eq!(
+            text(&out),
+            "Ну, там буде видно цю транзакцію чи ні? А це комісія за переказ, чи якась інша?"
+        );
+        assert!(out.iter().all(|x| x.source.as_deref() == Some(SOURCE_WHISPER)));
+        // Whisper's own words stay even where Parakeet differs, and a short
+        // run is left as it is.
+        let w = words("так добре давай далі", 0.0);
+        let p = words("Так. Добре. Давай далі.", 0.0);
+        assert_eq!(text(&merge(&p, &w)), "так добре давай далі");
+    }
+
+    #[test]
+    fn whisper_words_take_parakeets_times() {
+        // Whisper stretches "ну" over a pause and "кажу" too.
+        let mut w = words("ну я тобі кажу що завтра", 0.0);
+        w[0].end = 4.0;
+        w[3].start = 0.5;
+        w[3].end = 9.0;
+        let p = words("Ну, я тобі кажу, що завтра.", 3.0);
+        let out = merge(&p, &w);
+        assert_eq!(out.len(), 6);
+        for (o, q) in out.iter().zip(&p) {
+            assert_eq!((o.start, o.end), (q.start, q.end), "{}", o.text);
+        }
+        // A word only Whisper heard, stretched: fitted between neighbours.
+        let mut w = words("ну я тобі дуже кажу що завтра", 0.0);
+        w[3].start = 0.0;
+        w[3].end = 20.0;
+        let p = words("Ну я тобі кажу що завтра", 0.0);
+        let out = merge(&p, &w);
+        let d = out.iter().find(|x| x.text == "дуже").unwrap();
+        assert!(d.start >= out[2].end - 1e-9 && d.end <= out[4].start + 1e-9, "{d:?}");
+    }
+
+    #[test]
+    fn polish_looking_latin_is_not_english() {
+        for latin in [
+            "To, якщо możesz, to poszerwit lask. To trochę zroczniejszy bude.",
+            "Dobre, co to gdzie to?",
+            "kažem predlazimo trideset dolar",
+        ] {
+            let p = words(latin, 0.0);
+            let w = words("Так, якщо можна поширити, будь ласка", 0.0);
+            let out = merge(&p, &w);
+            assert!(
+                out.iter().all(|x| x.source.as_deref() != Some(SOURCE_PARAKEET_EN)),
+                "{latin}: {}",
+                text(&out)
+            );
+        }
+        let en = words("Okay, thank you, I think that is fine for now.", 0.0);
+        assert!(looks_english(&en));
+        let names = words("Since the foundation of Asunción in 1537, Paraguay has managed", 0.0);
+        assert!(looks_english(&names));
+        assert!(looks_english(&words("Dashboard settings profile", 0.0)));
+        assert!(looks_english(&words("Buenos Aires.", 0.0)));
+        assert!(!looks_english(&words("Dobre, co to gdzie to?", 0.0)));
     }
 
     fn text(ws: &[Word]) -> String {

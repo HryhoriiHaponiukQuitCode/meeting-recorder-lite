@@ -40,6 +40,9 @@ struct Common {
     /// Do not tell the voices of the system audio apart (plain "Others").
     #[arg(long)]
     no_voices: bool,
+    /// The user's name, shown for the microphone.
+    #[arg(long)]
+    me_name: Option<String>,
 }
 
 fn parse_quality(s: &str) -> Result<String, String> {
@@ -171,6 +174,7 @@ fn run(cli: Cli) -> Result<()> {
                 })),
                 model_dir: common.model_dir,
                 threads: common.threads,
+                me_name: common.me_name,
             };
             let result = pipeline::transcribe_session(
                 &dir,
@@ -244,6 +248,7 @@ fn run(cli: Cli) -> Result<()> {
                     quality: Quality::Fast,
                     voices: true,
                     heat_report: None,
+                    me_name: None,
                 },
             )?;
             eprintln!(

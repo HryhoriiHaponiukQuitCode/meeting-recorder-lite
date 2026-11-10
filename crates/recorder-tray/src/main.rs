@@ -626,6 +626,7 @@ impl App {
             self.settings.transcription_threads(),
             self.settings.transcription_quality(),
             self.settings.tell_voices_apart,
+            Some(self.settings.your_name.as_str()),
         ) {
             Ok(job) => self.job = Some(job),
             Err(e) => {
@@ -1960,6 +1961,26 @@ impl App {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui::toggle(ui, &mut self.settings.tell_voices_apart).changed() {
+                    self.save_settings();
+                }
+            });
+        });
+        ui.add_space(ui::S3);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new("Your name").font(FontId::new(14.0, ui::medium())));
+                ui.label(ui::muted("Shown for your microphone in new transcripts"));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.settings.your_name)
+                        .hint_text("Participant 1")
+                        .char_limit(recorder_transcribe::output::NAME_MAX_CHARS)
+                        .desired_width(200.0)
+                        .margin(vec2(8.0, 5.0)),
+                );
+                if field.changed() {
                     self.save_settings();
                 }
             });
