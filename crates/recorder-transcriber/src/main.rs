@@ -240,7 +240,7 @@ fn run(cli: Cli) -> Result<()> {
             threads,
         } => {
             let t = std::time::Instant::now();
-            let n = pipeline::relabel_voices(
+            let (n, m) = pipeline::relabel_voices(
                 &dir,
                 &Options {
                     model_dir,
@@ -252,7 +252,7 @@ fn run(cli: Cli) -> Result<()> {
                 },
             )?;
             eprintln!(
-                "{n} voices told apart in {:.1} s",
+                "voices told apart: {n} on the system audio, {m} on the microphone, in {:.1} s",
                 t.elapsed().as_secs_f64()
             );
             Ok(())

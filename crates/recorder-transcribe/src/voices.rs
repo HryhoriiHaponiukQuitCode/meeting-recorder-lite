@@ -31,6 +31,10 @@ pub const THRESHOLD: f32 = 0.62;
 pub const MAX_CLUSTER_POINTS: usize = 3000;
 /// A voice with a smaller share of the windows is folded into another.
 pub const MIN_VOICE_SHARE: f64 = 0.03;
+/// On the microphone (the user's own) another voice needs at least this
+/// many words; fewer go to the voice that says the most. On the user's
+/// calls such voices were a repeated "Дякую" or a few words of a video.
+pub const MIC_MIN_WORDS: usize = 25;
 
 /// Windows `(start, length)` in samples inside the speech segments; a
 /// segment shorter than a window is one window when long enough.
@@ -282,6 +286,52 @@ pub fn assign(words: &mut [Word], windows: &[(u64, usize)], prints: &[Vec<f32>])
     order.len() as u32
 }
 
+/// Voices with fewer than `min_words` words join the one with the most;
+/// numbers are given again by first appearance. Returns the number of
+/// voices left (0 for one: no voice on any word).
+pub fn fold_minor(words: &mut [Word], min_words: usize) -> u32 {
+    let mut count: Vec<(u32, usize)> = Vec::new();
+    for w in words.iter() {
+        if let Some(v) = w.voice {
+            match count.iter_mut().find(|(x, _)| *x == v) {
+                Some(c) => c.1 += 1,
+                None => count.push((v, 1)),
+            }
+        }
+    }
+    let Some(&(main, _)) = count.iter().max_by_key(|(_, n)| *n) else {
+        return 0;
+    };
+    let kept: Vec<u32> = count
+        .iter()
+        .filter(|(v, n)| *v == main || *n >= min_words)
+        .map(|(v, _)| *v)
+        .collect();
+    // New numbers by first appearance of the voices kept.
+    let mut order: Vec<u32> = Vec::new();
+    for w in words.iter_mut() {
+        if let Some(v) = w.voice {
+            let v = if kept.contains(&v) { v } else { main };
+            if !order.contains(&v) {
+                order.push(v);
+            }
+            w.voice = Some(v);
+        }
+    }
+    if order.len() < 2 {
+        for w in words.iter_mut() {
+            w.voice = None;
+        }
+        return 0;
+    }
+    for w in words.iter_mut() {
+        if let Some(v) = w.voice {
+            w.voice = order.iter().position(|&x| x == v).map(|i| i as u32 + 1);
+        }
+    }
+    order.len() as u32
+}
+
 /// Majority of a window and its touching neighbours (a lone window between
 /// two of another voice takes theirs).
 fn smooth(windows: &[(u64, usize)], labels: &[usize]) -> Vec<usize> {
@@ -375,6 +425,34 @@ mod tests {
             *e += ((x >> 33) as f32 / u32::MAX as f32 - 0.25) * 0.3;
         }
         normalized(&v)
+    }
+
+    #[test]
+    fn minor_voices_fold_into_the_main_one() {
+        let mut ws: Vec<Word> = (0..60)
+            .map(|i| {
+                let mut w = Word::new("слово", i as f64, i as f64 + 0.5);
+                // Voice 2 says 5 words first, voice 1 the next 25, voice 3 30.
+                w.voice = Some(match i {
+                    0..5 => 2,
+                    5..30 => 1,
+                    _ => 3,
+                });
+                w
+            })
+            .collect();
+        assert_eq!(fold_minor(&mut ws, 25), 2);
+        // Voice 2 joined the biggest (old 3), so it comes first now.
+        assert_eq!(ws[0].voice, Some(1));
+        assert_eq!(ws[10].voice, Some(2));
+        assert_eq!(ws[40].voice, Some(1));
+        // Nothing big enough besides the main voice: no voices at all.
+        let mut few: Vec<Word> = ws.iter().take(35).cloned().collect();
+        for (i, w) in few.iter_mut().enumerate() {
+            w.voice = Some(if i < 30 { 1 } else { 2 });
+        }
+        assert_eq!(fold_minor(&mut few, 25), 0);
+        assert!(few.iter().all(|w| w.voice.is_none()));
     }
 
     #[test]

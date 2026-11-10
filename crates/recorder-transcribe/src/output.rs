@@ -84,6 +84,10 @@ pub struct Document {
     /// Voices told apart on the system audio (0 = not separated or one).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub others_voices: u32,
+    /// Voices told apart on the microphone (several people in the room; 0 =
+    /// one or not separated).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub me_voices: u32,
     /// Who speaks: a name found in the conversation, else "Participant N"
     /// (see [`crate::names`]). Empty in transcripts made before names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -216,9 +220,20 @@ pub fn participants(dialog: &[Utterance], me: Option<&str>) -> Vec<Participant> 
     let mut names = crate::names::find(dialog);
     names.retain(|(speaker, _), _| *speaker != crate::Speaker::Me);
     let me = me.map(clean_name).filter(|n| !n.is_empty());
+    // With several people on the microphone the user is the one who says
+    // the most (nearest to it).
+    let mut said: Vec<(Option<u32>, usize)> = Vec::new();
+    for u in dialog.iter().filter(|u| u.speaker == crate::Speaker::Me && !u.echo) {
+        let n = u.text.split_whitespace().count();
+        match said.iter_mut().find(|(v, _)| *v == u.voice) {
+            Some(s) => s.1 += n,
+            None => said.push((u.voice, n)),
+        }
+    }
+    let user_voice = said.iter().max_by_key(|(_, n)| *n).and_then(|(v, _)| *v);
     let mut labels_from = names.clone();
     if let Some(n) = &me {
-        labels_from.insert((crate::Speaker::Me, None), n.clone());
+        labels_from.insert((crate::Speaker::Me, user_voice), n.clone());
     }
     crate::names::labels(dialog, &labels_from)
         .into_iter()
@@ -226,7 +241,9 @@ pub fn participants(dialog: &[Utterance], me: Option<&str>) -> Vec<Participant> 
             speaker,
             voice,
             name: names.get(&(speaker, voice)).cloned(),
-            given: (speaker == crate::Speaker::Me).then(|| me.clone()).flatten(),
+            given: (speaker == crate::Speaker::Me && voice == user_voice)
+                .then(|| me.clone())
+                .flatten(),
             label,
         })
         .collect()
@@ -381,6 +398,7 @@ mod tests {
             processing_s: 1.0,
             speakers: Speakers::default(),
             others_voices: 0,
+            me_voices: 0,
             participants: vec![],
             utterances: vec![
                 u(Speaker::Others, 1.0, 2.0, "Привіт.", false),

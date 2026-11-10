@@ -133,7 +133,10 @@ fn load(path: &Path) -> Result<Transcript, String> {
     let people: Vec<Person> = keys
         .iter()
         .map(|&(speaker, voice)| {
-            let mic = speaker == Speaker::Me;
+            // Blue for the first voice on the microphone (the user, as a
+            // rule); others on it take the next colours.
+            let mic = speaker == Speaker::Me
+                && keys.iter().find(|k| k.0 == Speaker::Me) == Some(&(speaker, voice));
             let color = if mic {
                 PEOPLE[0]
             } else {

@@ -541,6 +541,18 @@ fn best_quality_restores_what_whisper_skipped() {
 #[test]
 #[ignore = "needs the models"]
 fn voices_tell_people_apart() {
+    people_apart(Speaker::Others);
+}
+
+/// The same four people in one room, on the microphone (nothing on the
+/// system audio): told apart the same way.
+#[test]
+#[ignore = "needs the models"]
+fn voices_on_the_microphone_tell_people_apart() {
+    people_apart(Speaker::Me);
+}
+
+fn people_apart(channel: Speaker) {
     let en_path = PathBuf::from(std::env::var_os("MR_TEST_EN_WAV").expect("MR_TEST_EN_WAV"));
     let meta: serde_json::Value = serde_json::from_slice(
         &std::fs::read(en_path.with_file_name("english-source.json")).expect("english-source.json"),
@@ -558,13 +570,18 @@ fn voices_tell_people_apart() {
     }
     let en = wav("MR_TEST_EN_WAV");
     let ua = wav("MR_TEST_UA_WAV");
-    let mut right = en.clone();
-    right.extend(vec![0.0; 16_000 * 3]);
-    let switch = right.len() as f64 / 16_000.0;
+    let mut speech = en.clone();
+    speech.extend(vec![0.0; 16_000 * 3]);
+    let switch = speech.len() as f64 / 16_000.0;
     truth.push((switch, switch + 120.0, "ua".into(), "ua".into()));
-    right.extend_from_slice(&ua[..16_000 * 120]);
-    let left = vec![0.0; right.len()];
-    let root = temp_root("voices");
+    speech.extend_from_slice(&ua[..16_000 * 120]);
+    let silence = vec![0.0; speech.len()];
+    let (left, right) = if channel == Speaker::Me {
+        (speech, silence)
+    } else {
+        (silence, speech)
+    };
+    let root = temp_root(if channel == Speaker::Me { "mic-voices" } else { "voices" });
     let dir = make_session(&root, 60, &left, &right);
     transcribe_opts(
         &dir,
@@ -577,7 +594,7 @@ fn voices_tell_people_apart() {
     let d = document(&dir);
     let mut by_clip: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
     let mut by_voice: std::collections::BTreeMap<u32, Vec<String>> = Default::default();
-    for u in d.utterances.iter().filter(|u| u.speaker == Speaker::Others) {
+    for u in d.utterances.iter().filter(|u| u.speaker == channel) {
         for w in &u.words {
             let mid = (w.start + w.end) / 2.0;
             let Some((_, _, clip, person)) = truth
@@ -598,7 +615,12 @@ fn voices_tell_people_apart() {
         }
         c.into_iter().max_by_key(|x| x.1).unwrap()
     };
-    println!("{} voices", d.others_voices);
+    let voices = if channel == Speaker::Me {
+        d.me_voices
+    } else {
+        d.others_voices
+    };
+    println!("{voices} voices");
     for (clip, vs) in &by_clip {
         let (v, n) = top(vs);
         println!("clip {clip}: voice {v}, {n} of {} words", vs.len());
@@ -618,15 +640,15 @@ fn voices_tell_people_apart() {
             "voice {v} holds {distinct:?}"
         );
     }
-    assert!((4..=5).contains(&d.others_voices), "{}", d.others_voices);
+    assert!((4..=5).contains(&voices), "{voices}");
     // In order of appearance: the first reader is voice 1, the second 2.
     assert_eq!(top(&by_clip["1272-128104-0004"]).0, 1);
     assert_eq!(top(&by_clip["1462-170138-0024"]).0, 2);
     let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
     for v in 1..=4 {
-        let label = d.label(Speaker::Others, Some(v));
+        let label = d.label(channel, Some(v));
         assert!(txt.contains(&format!("] {label}: ")), "{label}");
     }
-    assert!(!txt.contains("] Others"));
+    assert!(!txt.contains("] Others") && !txt.contains("] Me"));
     std::fs::remove_dir_all(root).ok();
 }

@@ -1956,7 +1956,7 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.label(RichText::new("Tell voices apart").font(FontId::new(14.0, ui::medium())));
                 ui.label(ui::muted(
-                    "A name or Participant 1, 2… for each person on the call",
+                    "A name or Participant 1, 2… for each person on the call, also for several people at your microphone",
                 ));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
