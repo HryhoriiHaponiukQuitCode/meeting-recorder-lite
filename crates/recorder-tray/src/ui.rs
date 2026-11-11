@@ -807,6 +807,44 @@ pub fn meter(ui: &mut Ui, level: f32) {
 }
 
 /// A thin blue progress bar, `fraction` in 0..=1.
+/// A row with text on the left and controls on the right. The controls are
+/// laid out first and the text gets the room that is left (wrapped, or cut
+/// with "…" when `truncate`), so the two never overlap however long the
+/// text or narrow the window.
+pub fn sides<L, R>(
+    ui: &mut Ui,
+    height: f32,
+    truncate: bool,
+    left: impl FnOnce(&mut Ui) -> L,
+    right: impl FnOnce(&mut Ui) -> R,
+) -> (L, R) {
+    let s = egui::containers::Sides::new()
+        .height(height)
+        .spacing(S3)
+        .shrink_left();
+    let s = if truncate { s.truncate() } else { s.wrap() };
+    s.show(ui, left, right)
+}
+
+/// A setting: its name and a short note on the left, its control on the
+/// right (see [`sides`]).
+pub fn setting<R>(ui: &mut Ui, title: &str, note: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
+    sides(
+        ui,
+        38.0,
+        false,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new(title).font(FontId::new(14.0, medium())));
+                ui.label(muted(note));
+            });
+        },
+        control,
+    )
+    .1
+}
+
 /// A bar for work whose amount is not known yet: a segment sweeping across.
 pub fn progress_busy(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());

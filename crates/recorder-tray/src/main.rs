@@ -151,6 +151,10 @@ struct DevOptions {
     delete: bool,
     /// `--import <file>`: import this file at start.
     import: Option<PathBuf>,
+    /// `--preview-job <session> [--preview-heat warm]`: a transcription at
+    /// 54% shown for this recording (nothing is transcribed).
+    preview_job: Option<PathBuf>,
+    preview_warm: bool,
 }
 
 struct App {
@@ -284,6 +288,21 @@ impl App {
             app.confirm_delete = dev.show.clone();
         }
         app.import_queue.extend(dev.import.clone());
+        if let Some(dir) = &dev.preview_job {
+            let state = transcription::JobState {
+                started: true,
+                started_at: Instant::now().checked_sub(Duration::from_secs(300)),
+                done_s: 1980.0,
+                total_s: 3680.0,
+                heat: if dev.preview_warm {
+                    recorder_transcribe::heat::Heat::Warm
+                } else {
+                    recorder_transcribe::heat::Heat::Normal
+                },
+                ..Default::default()
+            };
+            app.job = TranscriptionJob::preview(dir, state).ok();
+        }
         if let (Some(dir), Some(text)) = (dev.show.clone(), dev.rename) {
             app.renaming = Some(Renaming {
                 dir,
@@ -1223,11 +1242,14 @@ impl App {
 
     /// Transcript buttons for one recording, laid out right to left:
     /// Transcribe / progress and Stop / Queued / Open / Try again / Set up.
+    /// `compact`: a running transcription shows only Stop (the list row
+    /// puts its status next to the bar instead).
     fn transcript_controls(
         &self,
         ui: &mut egui::Ui,
         dir: &Path,
         state: &TranscriptState,
+        compact: bool,
     ) -> Option<TranscriptAction> {
         let mut action = None;
         let job = self.job.as_ref().filter(|j| j.session() == dir);
@@ -1235,31 +1257,10 @@ impl App {
             if ui::outline_small(ui, "Stop", Some((ui::Icon::Stop, ui::RED))).clicked() {
                 action = Some(TranscriptAction::Stop);
             }
-            let st = job.state();
-            let fraction = (st.total_s > 0.0).then(|| st.done_s / st.total_s);
-            let pct = match fraction {
-                Some(f) if st.started => format!("{:.0}%", f * 100.0),
-                _ => "Loading model…".into(),
-            };
-            use recorder_transcribe::heat::Heat;
-            let (text, hint) = match st.heat {
-                // The time left, once there is enough to go by.
-                Heat::Normal => match (fraction, st.started_at) {
-                    (Some(f), Some(t0)) if f >= 0.03 && t0.elapsed().as_secs() >= 20 => {
-                        let left = t0.elapsed().as_secs_f64() * (1.0 - f) / f;
-                        (format!("{pct} · {}", time_left(left)), None)
-                    }
-                    _ => (pct, None),
-                },
-                Heat::Warm => (
-                    format!("{pct} · resting"),
-                    Some("The Mac is warm: transcription takes breaks to cool it down."),
-                ),
-                Heat::Hot => (
-                    format!("{pct} · cooling down"),
-                    Some("The Mac is hot: transcription waits until it cools down."),
-                ),
-            };
+            let (text, hint) = job_status(&job.state());
+            if compact {
+                return action;
+            }
             let pill = ui::pill(ui, &text, ui::Tone::Blue, true);
             if let Some(h) = hint {
                 pill.on_hover_text(h);
@@ -1306,12 +1307,15 @@ impl App {
     fn transcript_row(&self, ui: &mut egui::Ui, dir: &Path) -> Option<TranscriptAction> {
         let mut action = None;
         let queued = self.queue.iter().any(|d| d == dir);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Transcript").font(FontId::new(14.0, ui::medium())));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                action = self.transcript_controls(ui, dir, &self.last_transcript);
-            });
-        });
+        ui::sides(
+            ui,
+            28.0,
+            true,
+            |ui| {
+                ui.label(RichText::new("Transcript").font(FontId::new(14.0, ui::medium())));
+            },
+            |ui| action = self.transcript_controls(ui, dir, &self.last_transcript, false),
+        );
         let hint = if let Some(p) = self.job_progress(dir) {
             ui.add_space(ui::S1);
             job_bar(ui, p);
@@ -1387,19 +1391,30 @@ impl App {
                     .unwrap_or_default();
                 let waiting = self.import_queue.len();
                 let mut cancel = false;
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("Importing “{name}”…")).color(ui::INK),
-                        )
-                        .truncate(),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        cancel = ui::outline_small(ui, "Cancel", None).clicked();
-                    });
-                });
+                ui::sides(
+                    ui,
+                    28.0,
+                    true,
+                    |ui| {
+                        ui.label(RichText::new(format!("Importing “{name}”…")).color(ui::INK));
+                    },
+                    |ui| cancel = ui::outline_small(ui, "Cancel", None).clicked(),
+                );
                 ui.add_space(ui::S1);
-                ui::progress(ui, job.progress());
+                let p = job.progress();
+                ui::sides(
+                    ui,
+                    16.0,
+                    true,
+                    |ui| ui::progress(ui, p),
+                    |ui| {
+                        ui.label(
+                            RichText::new(format!("{:.0}%", p * 100.0))
+                                .size(12.0)
+                                .color(ui::BLUE),
+                        );
+                    },
+                );
                 if waiting > 0 {
                     ui.add_space(ui::S1);
                     ui.label(ui::muted(format!("{waiting} more waiting")));
@@ -1473,12 +1488,17 @@ impl App {
         // over it, so they still take their own clicks.
         let selected = self.reader.dir() == Some(s.dir.as_path());
         let progress = self.job_progress(&s.dir);
-        let height = if progress.is_some() { 64.0 } else { 52.0 };
+        // The bar of a running transcription goes inside the row, under
+        // its 52 px of text and buttons.
+        // With a running transcription: the text and Stop (44), its bar
+        // and status (16) just under, and the same padding below as above.
+        let height = if progress.is_some() { 80.0 } else { 52.0 };
+        let text_height = if progress.is_some() { 48.0 } else { 52.0 };
         let (rect, row) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), egui::Sense::click());
         let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
         let fill = if selected {
-            ui::BLUE.gamma_multiply(0.08)
+            ui::BLUE.gamma_multiply(0.13)
         } else if row.hovered() {
             ui::HOVER
         } else {
@@ -1494,51 +1514,46 @@ impl App {
                 .max_rect(rect)
                 .layout(Layout::top_down(Align::Min)),
         );
-        // Room for what shows on the right; long names are cut before it.
+        // The controls are laid out first and the name and its line get the
+        // room left, cut with "…" (ui::sides), so they never run under them.
         let near = inner.rect_contains_pointer(rect) || selected;
         let done = matches!(s.transcript, TranscriptState::Done(_));
-        let controls = s.recording || (s.transcribable() && (!done || busy || queued));
-        // A running transcription shows "12% · ~9 min left" and Stop.
-        let reserve = if near && !busy && !queued { 44.0 } else { 0.0 }
-            + if busy {
-                220.0
-            } else if controls {
-                120.0
-            } else {
-                0.0
-            };
-        inner.horizontal(|ui| {
-            ui.set_min_height(52.0);
-            ui.vertical(|ui| {
-                ui.set_max_width((rect.width() - reserve - ui::S2).max(100.0));
-                ui.add_space(ui::S2);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                let (name, sub) = match &s.title {
-                    Some(t) => (
-                        t.clone(),
-                        format!(
-                            "{} · {} · {state}",
-                            when(s.started),
-                            duration_words(s.seconds)
-                        ),
-                    ),
-                    None => (
-                        when(s.started),
-                        format!("{} · {state}", duration_words(s.seconds)),
-                    ),
-                };
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(name)
-                            .font(FontId::new(14.0, ui::medium()))
-                            .color(if selected { ui::BLUE } else { ui::INK }),
-                    )
-                    .truncate()
-                    .selectable(false),
-                );
-                ui.add(egui::Label::new(ui::muted(sub)).truncate().selectable(false));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let (name, sub) = match &s.title {
+            Some(t) => (
+                t.clone(),
+                format!(
+                    "{} · {} · {state}",
+                    when(s.started),
+                    duration_words(s.seconds)
+                ),
+            ),
+            None => (
+                when(s.started),
+                format!("{} · {state}", duration_words(s.seconds)),
+            ),
+        };
+        if progress.is_some() {
+            inner.add_space(2.0);
+        }
+        ui::sides(
+            &mut inner,
+            text_height,
+            true,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(name)
+                                .font(FontId::new(14.0, ui::medium()))
+                                .color(if selected { ui::BLUE } else { ui::INK }),
+                        )
+                        .selectable(false),
+                    );
+                    ui.add(egui::Label::new(ui::muted(sub)).selectable(false));
+                });
+            },
+            |ui| {
                 // The folder button only on the row under the pointer or the
                 // shown one, so the list stays quiet.
                 if near
@@ -1552,14 +1567,36 @@ impl App {
                     ui::pill(ui, "Recording", ui::Tone::Red, true);
                 } else if s.transcribable() && (!done || busy || queued) {
                     action = self
-                        .transcript_controls(ui, &s.dir, &s.transcript)
+                        .transcript_controls(ui, &s.dir, &s.transcript, true)
                         .or(action.take());
                 }
-            });
-        });
+            },
+        );
         if let Some(p) = progress {
-            inner.add_space(ui::S1);
-            job_bar(&mut inner, p);
+            let status = self
+                .job
+                .as_ref()
+                .filter(|j| j.session() == s.dir)
+                .map(|j| job_status(&j.state()));
+            inner.add_space(-2.0);
+            ui::sides(
+                &mut inner,
+                16.0,
+                true,
+                |ui| job_bar(ui, p),
+                |ui| {
+                    if let Some((text, hint)) = status {
+                        let l = ui.label(
+                            RichText::new(text)
+                                .size(12.0)
+                                .color(ui::BLUE),
+                        );
+                        if let Some(h) = hint {
+                            l.on_hover_text(h);
+                        }
+                    }
+                },
+            );
         }
         (action, rect)
     }
@@ -1604,6 +1641,83 @@ impl App {
 
     /// The right side: the transcript of the selected recording, or what
     /// stands in for it (transcribing, not yet, failed, nothing selected).
+    /// The transcript header's buttons, laid out right to left.
+    fn pane_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        info: &SessionInfo,
+    ) -> Option<TranscriptAction> {
+        let mut action = None;
+        let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
+            || self.queue.contains(&info.dir);
+        // Not while it is recorded or transcribed.
+        if !info.recording && !busy && ui::icon_button(ui, ui::Icon::Trash, "Delete…").clicked() {
+            self.confirm_delete = Some(info.dir.clone());
+        }
+        if ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
+            action = Some(TranscriptAction::Reveal(info.dir.clone()));
+        }
+        if ui::icon_button(ui, ui::Icon::Pencil, "Rename").clicked() {
+            self.start_renaming(info);
+        }
+        match (&info.transcript, busy) {
+            (TranscriptState::Done(txt), false) => {
+                if ui::outline_small(ui, "Open file", None)
+                    .on_hover_text("transcript.txt in your text editor")
+                    .clicked()
+                {
+                    action = Some(TranscriptAction::Open(txt.clone()));
+                }
+                if ui::outline_small(ui, "Copy all", None).clicked()
+                    && let Some(Ok(t)) = &self.reader.transcript
+                {
+                    ui.ctx().copy_text(reader::plain_text(t));
+                    self.message = Some(Message {
+                        text: "The transcript is copied.".into(),
+                        problem: false,
+                    });
+                }
+            }
+            _ if info.transcribable() => {
+                if let Some(a) = self.transcript_controls(ui, &info.dir, &info.transcript, false) {
+                    action = Some(a);
+                }
+            }
+            _ => {}
+        }
+        action
+    }
+
+    /// The transcript header's name (double-click renames) and its date.
+    fn pane_title(&mut self, ui: &mut egui::Ui, info: &SessionInfo) {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let (name, sub) = match &info.title {
+                Some(t) => (
+                    t.clone(),
+                    format!("{} · {}", when(info.started), duration_words(info.seconds)),
+                ),
+                None => (when(info.started), duration_words(info.seconds)),
+            };
+            let title = ui
+                .add(
+                    egui::Label::new(
+                        RichText::new(name)
+                            .font(FontId::new(19.0, ui::bold()))
+                            .color(ui::INK),
+                    )
+                    .truncate()
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::Text);
+            if title.double_clicked() {
+                self.start_renaming(info);
+            }
+            ui.add(egui::Label::new(ui::muted(sub)).truncate().selectable(false));
+        });
+    }
+
     fn start_renaming(&mut self, info: &SessionInfo) {
         self.renaming = Some(Renaming {
             dir: info.dir.clone(),
@@ -1628,9 +1742,9 @@ impl App {
                         egui::TextEdit::singleline(&mut r.text)
                             .hint_text(when(info.started))
                             .char_limit(sessions::TITLE_MAX_CHARS)
-                            .font(FontId::new(17.0, ui::medium()))
+                            .font(FontId::new(15.0, ui::medium()))
                             .desired_width(ui.available_width() - ui::S2)
-                            .margin(vec2(10.0, 7.0)),
+                            .margin(vec2(8.0, 5.0)),
                     );
                     if r.focus {
                         field.request_focus();
@@ -1705,82 +1819,26 @@ impl App {
             // with it. The buttons first, so a long name is cut before them.
             if self.renaming.as_ref().is_some_and(|r| r.dir == info.dir) {
                 self.rename_row(ui, &info);
+            } else if ui.available_width() < 580.0 {
+                // A narrow pane: the buttons go under the name, so the name
+                // and its date keep a line of their own.
+                self.pane_title(ui, &info);
+                ui.add_space(ui::S2);
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(a) = self.pane_buttons(ui, &info) {
+                            action = Some(a);
+                        }
+                    });
+                });
             } else {
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
-                            || self.queue.contains(&info.dir);
-                        // Not while it is recorded or transcribed.
-                        if !info.recording
-                            && !busy
-                            && ui::icon_button(ui, ui::Icon::Trash, "Delete…").clicked()
-                        {
-                            self.confirm_delete = Some(info.dir.clone());
-                        }
-                        if ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
-                            action = Some(TranscriptAction::Reveal(info.dir.clone()));
-                        }
-                        if ui::icon_button(ui, ui::Icon::Pencil, "Rename").clicked() {
-                            self.start_renaming(&info);
-                        }
-                        match (&info.transcript, busy) {
-                            (TranscriptState::Done(txt), false) => {
-                                if ui::outline_small(ui, "Open file", None)
-                                    .on_hover_text("transcript.txt in your text editor")
-                                    .clicked()
-                                {
-                                    action = Some(TranscriptAction::Open(txt.clone()));
-                                }
-                                if ui::outline_small(ui, "Copy all", None).clicked()
-                                    && let Some(Ok(t)) = &self.reader.transcript
-                                {
-                                    ui.ctx().copy_text(reader::plain_text(t));
-                                    self.message = Some(Message {
-                                        text: "The transcript is copied.".into(),
-                                        problem: false,
-                                    });
-                                }
-                            }
-                            _ if info.transcribable() => {
-                                if let Some(a) =
-                                    self.transcript_controls(ui, &info.dir, &info.transcript)
-                                {
-                                    action = Some(a);
-                                }
-                            }
-                            _ => {}
+                        if let Some(a) = self.pane_buttons(ui, &info) {
+                            action = Some(a);
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                let (name, sub) = match &info.title {
-                                    Some(t) => (
-                                        t.clone(),
-                                        format!(
-                                            "{} · {}",
-                                            when(info.started),
-                                            duration_words(info.seconds)
-                                        ),
-                                    ),
-                                    None => (when(info.started), duration_words(info.seconds)),
-                                };
-                                let title = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(name)
-                                                .font(FontId::new(19.0, ui::bold()))
-                                                .color(ui::INK),
-                                        )
-                                        .truncate()
-                                        .selectable(false)
-                                        .sense(egui::Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::Text);
-                                if title.double_clicked() {
-                                    self.start_renaming(&info);
-                                }
-                                ui.label(ui::muted(sub));
-                            });
+                            self.pane_title(ui, &info);
                         });
                     });
                 });
@@ -1957,19 +2015,12 @@ impl App {
         ui.add_space(ui::S3);
         ui::divider(ui);
         ui.add_space(ui::S3);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new("Consent reminder").font(FontId::new(14.0, ui::medium())));
-                ui.label(ui::muted("Before every recording"));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let mut remind = !self.settings.consent_reminder_dismissed;
-                if ui::toggle(ui, &mut remind).changed() {
-                    self.settings.consent_reminder_dismissed = !remind;
-                    self.save_settings();
-                }
-            });
+        ui::setting(ui, "Consent reminder", "Before every recording", |ui| {
+            let mut remind = !self.settings.consent_reminder_dismissed;
+            if ui::toggle(ui, &mut remind).changed() {
+                self.settings.consent_reminder_dismissed = !remind;
+                self.save_settings();
+            }
         });
     }
 
@@ -2036,20 +2087,21 @@ impl App {
                 (0, transcription::download_size(quality), Phase::Downloading),
                 |p| (p.done, p.total, p.phase),
             );
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(match phase {
-                        Phase::Downloading => {
-                            format!("Downloading… {:.0} of {:.0} MB", mb(done), mb(total))
-                        }
-                        Phase::Verifying => "Checking the files…".into(),
-                    })
-                    .color(ui::INK),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    cancel = ui::outline_small(ui, "Cancel", None).clicked();
-                });
-            });
+            let text = match phase {
+                Phase::Downloading => {
+                    format!("Downloading… {:.0} of {:.0} MB", mb(done), mb(total))
+                }
+                Phase::Verifying => "Checking the files…".into(),
+            };
+            ui::sides(
+                ui,
+                28.0,
+                true,
+                |ui| {
+                    ui.label(RichText::new(text).color(ui::INK));
+                },
+                |ui| cancel = ui::outline_small(ui, "Cancel", None).clicked(),
+            );
             ui.add_space(ui::S1);
             ui::progress(ui, done as f32 / total.max(1) as f32);
             ui.add_space(ui::S1);
@@ -2059,7 +2111,10 @@ impl App {
         } else if self.model_status == ModelStatus::Ready {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(format!("Speech models · {:.0} MB", mb(self.model_size)))
+                    RichText::new(format!(
+                        "Speech models · {:.1} GB",
+                        self.model_size as f64 / 1_073_741_824.0
+                    ))
                         .color(ui::INK),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2116,43 +2171,28 @@ impl App {
         ui.add_space(ui::S3);
         ui::divider(ui);
         ui.add_space(ui::S3);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(
-                    RichText::new("Transcribe automatically").font(FontId::new(14.0, ui::medium())),
-                );
-                ui.label(ui::muted("After each recording"));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui::toggle(ui, &mut self.settings.transcribe_automatically).changed() {
-                    self.save_settings();
-                }
-            });
+        ui::setting(ui, "Transcribe automatically", "After each recording", |ui| {
+            if ui::toggle(ui, &mut self.settings.transcribe_automatically).changed() {
+                self.save_settings();
+            }
         });
         ui.add_space(ui::S3);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new("Tell voices apart").font(FontId::new(14.0, ui::medium())));
-                ui.label(ui::muted(
-                    "A name or Participant 1, 2… for each person on the call, also for several people at your microphone",
-                ));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui::setting(
+            ui,
+            "Tell voices apart",
+            "A name or Participant 1, 2… for each voice, on the call and at your microphone",
+            |ui| {
                 if ui::toggle(ui, &mut self.settings.tell_voices_apart).changed() {
                     self.save_settings();
                 }
-            });
-        });
+            },
+        );
         ui.add_space(ui::S3);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new("Your name").font(FontId::new(14.0, ui::medium())));
-                ui.label(ui::muted("Shown for your microphone in new transcripts"));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui::setting(
+            ui,
+            "Your name",
+            "Shown for your microphone in new transcripts",
+            |ui| {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut self.settings.your_name)
                         .hint_text("Participant 1")
@@ -2163,8 +2203,8 @@ impl App {
                 if field.changed() {
                     self.save_settings();
                 }
-            });
-        });
+            },
+        );
         ui.add_space(ui::S3);
         ui.label(ui::caption("Speed"));
         ui.add_space(ui::S1);
@@ -2275,7 +2315,9 @@ impl App {
         let response = egui::Modal::new(egui::Id::new("delete"))
             .frame(ui::modal_frame())
             .show(ctx, |ui| {
-                ui.set_width(360.0);
+                // Wide enough for its three buttons and the text in three
+                // even lines.
+                ui.set_width(470.0);
                 modal_title(ui, &format!("Delete “{name}”?"));
                 ui.label(
                     RichText::new(if has_transcript {
@@ -2490,6 +2532,35 @@ impl Drop for App {
 }
 
 /// The title of the section column, with something on the right.
+/// "54% · ~4 min left", "54% · resting", "Loading model…", and a hint for
+/// the resting states.
+fn job_status(st: &transcription::JobState) -> (String, Option<&'static str>) {
+    let fraction = (st.total_s > 0.0).then(|| st.done_s / st.total_s);
+    let pct = match fraction {
+        Some(f) if st.started => format!("{:.0}%", f * 100.0),
+        _ => "Loading model…".into(),
+    };
+    use recorder_transcribe::heat::Heat;
+    match st.heat {
+        // The time left, once there is enough to go by.
+        Heat::Normal => match (fraction, st.started_at) {
+            (Some(f), Some(t0)) if f >= 0.03 && t0.elapsed().as_secs() >= 20 => {
+                let left = t0.elapsed().as_secs_f64() * (1.0 - f) / f;
+                (format!("{pct} · {}", time_left(left)), None)
+            }
+            _ => (pct, None),
+        },
+        Heat::Warm => (
+            format!("{pct} · resting"),
+            Some("The Mac is warm: transcription takes breaks to cool it down."),
+        ),
+        Heat::Hot => (
+            format!("{pct} · cooling down"),
+            Some("The Mac is hot: transcription waits until it cools down."),
+        ),
+    }
+}
+
 /// A transcription's bar: sweeping while the model loads, then filling.
 fn job_bar(ui: &mut egui::Ui, progress: Option<f32>) {
     match progress {
@@ -2666,6 +2737,8 @@ fn dev_options() -> DevOptions {
         edit_person: value("--edit-person").and_then(|v| v.parse().ok()),
         delete: args.iter().any(|a| a == "--delete"),
         import: value("--import").map(PathBuf::from),
+        preview_job: value("--preview-job").map(PathBuf::from),
+        preview_warm: value("--preview-heat").as_deref() == Some("warm"),
     }
 }
 

@@ -234,30 +234,43 @@ pub fn people(
         );
     };
     if let Some(e) = edit.as_mut() {
+        // Keys in the field; the buttons.
         let (mut save, mut cancel) = (false, false);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = ui::S2;
-            caption(ui);
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut e.text)
-                    .hint_text(e.was.as_str())
-                    .char_limit(recorder_transcribe::output::NAME_MAX_CHARS)
-                    .desired_width(220.0)
-                    .margin(vec2(8.0, 5.0)),
-            );
-            if e.focus {
-                field.request_focus();
-                e.focus = false;
-            }
-            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                save = true;
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                cancel = true;
-            }
-            save |= ui::primary_small(ui, "Save").clicked();
-            cancel |= ui::outline_small(ui, "Cancel", None).clicked();
-        });
+        let (mut save_click, mut cancel_click) = (false, false);
+        // The buttons first; the field takes the room left (ui::sides).
+        ui::sides(
+            ui,
+            30.0,
+            true,
+            |ui| {
+                ui.spacing_mut().item_spacing.x = ui::S2;
+                caption(ui);
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut e.text)
+                        .hint_text(e.was.as_str())
+                        .char_limit(recorder_transcribe::output::NAME_MAX_CHARS)
+                        .desired_width(ui.available_width().clamp(80.0, 260.0))
+                        .margin(vec2(8.0, 5.0)),
+                );
+                if e.focus {
+                    field.request_focus();
+                    e.focus = false;
+                }
+                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+            },
+            |ui| {
+                // Right to left: the action at the edge, Cancel before it.
+                save_click = ui::primary_small(ui, "Save").clicked();
+                cancel_click = ui::outline_small(ui, "Cancel", None).clicked();
+            },
+        );
+        save |= save_click;
+        cancel |= cancel_click;
         ui.label(ui::muted(
             "Renames them in the whole transcript and its files. Leave empty for the \
              name found in the call.",

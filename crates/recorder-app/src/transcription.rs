@@ -262,6 +262,24 @@ impl TranscriptionJob {
         &self.session
     }
 
+    /// A job that shows `state` for `session` without transcribing (window
+    /// screenshots); its process is a `sleep`.
+    #[doc(hidden)]
+    pub fn preview(session: &Path, state: JobState) -> io::Result<Self> {
+        let child = Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        Ok(Self {
+            session: session.to_path_buf(),
+            child,
+            state: Arc::new(Mutex::new(state)),
+            outcome: None,
+        })
+    }
+
     pub fn state(&self) -> JobState {
         self.state.lock().expect("state").clone()
     }
