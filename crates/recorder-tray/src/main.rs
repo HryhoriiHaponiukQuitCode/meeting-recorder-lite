@@ -1540,18 +1540,13 @@ impl App {
             text_height,
             true,
             |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(name)
-                                .font(FontId::new(14.0, ui::medium()))
-                                .color(if selected { ui::BLUE } else { ui::INK }),
-                        )
-                        .selectable(false),
-                    );
-                    ui.add(egui::Label::new(ui::muted(sub)).selectable(false));
-                });
+                ui::two_lines(
+                    ui,
+                    RichText::new(name)
+                        .font(FontId::new(14.0, ui::medium()))
+                        .color(if selected { ui::BLUE } else { ui::INK }),
+                    ui::muted(sub),
+                );
             },
             |ui| {
                 // The folder button only on the row under the pointer or the

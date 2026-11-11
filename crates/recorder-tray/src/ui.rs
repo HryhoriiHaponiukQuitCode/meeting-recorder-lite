@@ -826,6 +826,30 @@ pub fn sides<L, R>(
     s.show(ui, left, right)
 }
 
+/// Two lines (a name and a quieter line under it), each cut with "…" to
+/// the width, and centred vertically in the height the row has, so they
+/// sit on the same middle line as the buttons beside them.
+pub fn two_lines(ui: &mut Ui, title: RichText, sub: RichText) {
+    let gap = 2.0;
+    let width = ui.available_width();
+    let galley = |ui: &Ui, t: RichText| {
+        egui::WidgetText::from(t).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Truncate),
+            width,
+            egui::TextStyle::Body,
+        )
+    };
+    let (t, s) = (galley(ui, title), galley(ui, sub));
+    let top = ((ui.available_height() - (t.size().y + gap + s.size().y)) / 2.0).max(0.0);
+    ui.vertical(|ui| {
+        ui.add_space(top);
+        ui.spacing_mut().item_spacing.y = gap;
+        ui.add(egui::Label::new(t).selectable(false));
+        ui.add(egui::Label::new(s).selectable(false));
+    });
+}
+
 /// A setting: its name and a short note on the left, its control on the
 /// right (see [`sides`]).
 pub fn setting<R>(ui: &mut Ui, title: &str, note: &str, control: impl FnOnce(&mut Ui) -> R) -> R {
