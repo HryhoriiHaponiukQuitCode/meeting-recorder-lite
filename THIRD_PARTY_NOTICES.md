@@ -2,7 +2,8 @@
 
 Meeting Recorder includes or is derived from the following third-party work.
 Every Rust dependency is under MIT, Apache-2.0, BSD, ISC, Zlib or
-Unicode terms; `cargo tree` lists them with their licenses.
+Unicode terms, except Symphonia (MPL-2.0, below); `cargo tree` lists them
+with their licenses.
 
 ## Source code adapted from other projects
 
@@ -253,6 +254,16 @@ https://datatracker.ietf.org/ipr/1914/
 Broadcom Corporation:
 https://datatracker.ietf.org/ipr/1526/
 ```
+
+### Symphonia (Rust crates, MPL-2.0)
+
+The `symphonia` crates (https://github.com/pdeljanov/Symphonia, version
+0.6.1) decode the audio and video files the user imports. They are used
+unmodified; their source code is available at the address above. Licensed
+under the Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/):
+"This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this file,
+You can obtain one at https://mozilla.org/MPL/2.0/."
 
 ### ogg (Rust crate, BSD-3-Clause)
 

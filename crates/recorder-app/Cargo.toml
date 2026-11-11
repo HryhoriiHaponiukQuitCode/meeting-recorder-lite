@@ -20,6 +20,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2.5"
 # Deleting recordings and transcripts moves them to the Trash / Recycle Bin.
 trash = "5.3"
+# Importing audio and video files (MPL-2.0; see THIRD_PARTY_NOTICES.md).
+symphonia = { version = "0.6.1", default-features = false, features = ["opt-simd", "mp3", "aac", "alac", "flac", "pcm", "adpcm", "vorbis", "isomp4", "wav", "aiff", "caf", "ogg", "mkv", "id3v2", "id3v1", "ape"] }
+rubato = { version = "5.0.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

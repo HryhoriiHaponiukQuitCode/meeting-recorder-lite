@@ -69,6 +69,8 @@ impl PartReader {
         let channels = h[9] as usize;
         let (streams, coupled, mapping) = match (channels, h[18]) {
             (1, 0) => (1, 0, vec![0]),
+            // Plain stereo files (mapping family 0): one coupled stream.
+            (2, 0) => (1, 1, vec![0, 1]),
             (2, 1) if h.len() >= 23 => (h[19], h[20], vec![h[21], h[22]]),
             _ => {
                 return Err(bad(

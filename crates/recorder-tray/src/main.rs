@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use eframe::egui::{self, Align, FontId, Layout, RichText, TextureHandle, ViewportCommand, vec2};
+use recorder_app::import::{self, ImportJob};
 use recorder_app::permissions::{self, Access, Permission};
 use recorder_app::sessions::{self, SessionInfo};
 use recorder_app::settings::Settings;
@@ -148,6 +149,8 @@ struct DevOptions {
     /// `--delete`: the delete confirmation for the shown recording (it
     /// deletes nothing by itself).
     delete: bool,
+    /// `--import <file>`: import this file at start.
+    import: Option<PathBuf>,
 }
 
 struct App {
@@ -200,6 +203,9 @@ struct App {
     person_edit: Option<reader::PersonEdit>,
     /// The recording whose delete confirmation is open.
     confirm_delete: Option<PathBuf>,
+    /// The file being imported, and files waiting for it.
+    import: Option<ImportJob>,
+    import_queue: VecDeque<PathBuf>,
     /// The last recording's name, if it was given one.
     last_title: Option<String>,
 }
@@ -214,6 +220,8 @@ impl App {
             egui::TextureOptions::LINEAR,
         );
         let settings = Settings::load();
+        // What an import cut short by a crash or a quit left behind.
+        import::clean(&settings.recordings_dir());
         let last = sessions::latest(&settings.recordings_dir()).map(|s| LastRecording {
             dir: s.dir,
             started: s.started,
@@ -259,6 +267,8 @@ impl App {
             renaming: None,
             person_edit: None,
             confirm_delete: None,
+            import: None,
+            import_queue: VecDeque::new(),
             last_title: None,
             settings,
         };
@@ -273,6 +283,7 @@ impl App {
         if dev.delete {
             app.confirm_delete = dev.show.clone();
         }
+        app.import_queue.extend(dev.import.clone());
         if let (Some(dir), Some(text)) = (dev.show.clone(), dev.rename) {
             app.renaming = Some(Renaming {
                 dir,
@@ -601,6 +612,101 @@ impl App {
         self.disk_checked = Instant::now();
     }
 
+    /// Starts the next import and handles a finished one: the new
+    /// recording is shown and, like a recording, transcribed.
+    fn pump_import(&mut self) {
+        if let Some(job) = &self.import
+            && let Some(result) = job.poll()
+        {
+            let name = job
+                .file()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.import = None;
+            match result {
+                Ok(dir) => {
+                    self.message = Some(Message {
+                        text: format!("“{name}” is imported."),
+                        problem: false,
+                    });
+                    if self.settings.transcribe_automatically
+                        && self.model_status == ModelStatus::Ready
+                    {
+                        self.enqueue(dir.clone());
+                    }
+                    self.renaming = None;
+                    self.person_edit = None;
+                    self.reader.select(Some(dir));
+                    self.go(View::Recordings);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    self.message = Some(Message {
+                        text: "The import is cancelled.".into(),
+                        problem: false,
+                    });
+                }
+                Err(e) => {
+                    self.message = Some(Message {
+                        text: format!("Cannot import “{name}”: {e}"),
+                        problem: true,
+                    });
+                }
+            }
+            self.check_disk();
+        }
+        if self.import.is_none()
+            && let Some(file) = self.import_queue.pop_front()
+        {
+            self.import = Some(ImportJob::start(file, self.settings.recordings_dir()));
+        }
+    }
+
+    /// Files dropped on the window are imported; a hint shows while they
+    /// are dragged over it.
+    fn drop_files(&mut self, ctx: &egui::Context) {
+        let (hovered, dropped) = ctx.input(|i| {
+            (
+                !i.raw.hovered_files.is_empty(),
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        if hovered {
+            let rect = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("drop"),
+            ));
+            painter.rect_filled(rect, 0, ui::CANVAS.gamma_multiply(0.92));
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop audio or video files to import and transcribe them",
+                FontId::new(17.0, ui::medium()),
+                ui::INK,
+            );
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        let (ok, other): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| import::supported(p));
+        if let Some(p) = other.first() {
+            self.message = Some(Message {
+                text: format!(
+                    "“{}” is not an audio or video file this app can import.",
+                    p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                ),
+                problem: true,
+            });
+        }
+        self.import_queue.extend(ok);
+    }
+
     fn enqueue(&mut self, dir: PathBuf) {
         let busy = self.job.as_ref().is_some_and(|j| j.session() == dir);
         if !busy && !self.queue.contains(&dir) {
@@ -676,6 +782,7 @@ impl App {
     fn poll(&mut self, ctx: &egui::Context) {
         self.collect_saved(false);
         self.poll_download();
+        self.pump_import();
         self.pump_transcription();
         if self.disk_checked.elapsed() >= DISK_CHECK {
             self.check_disk();
@@ -1245,6 +1352,16 @@ impl App {
             if ui::icon_button(ui, ui::Icon::Folder, "Open the recordings folder").clicked() {
                 action = Some(TranscriptAction::Reveal(self.settings.recordings_dir()));
             }
+            if ui::outline_small(ui, "Import…", Some((ui::Icon::Plus, ui::BLUE)))
+                .on_hover_text("Transcribe an audio or video file (or drop it on the window)")
+                .clicked()
+                && let Some(files) = rfd::FileDialog::new()
+                    .set_title("Import audio or video")
+                    .add_filter("Audio and video", import::EXTENSIONS)
+                    .pick_files()
+            {
+                self.import_queue.extend(files);
+            }
         });
         ui::card(ui, |ui| {
             let count = self.sessions.len();
@@ -1254,9 +1371,41 @@ impl App {
                     ui.label(ui::muted(total.to_string()));
                 }
             });
+            if let Some(job) = &self.import {
+                let name = job
+                    .file()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let waiting = self.import_queue.len();
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("Importing “{name}”…")).color(ui::INK),
+                        )
+                        .truncate(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        cancel = ui::outline_small(ui, "Cancel", None).clicked();
+                    });
+                });
+                ui.add_space(ui::S1);
+                ui::progress(ui, job.progress());
+                if waiting > 0 {
+                    ui.add_space(ui::S1);
+                    ui.label(ui::muted(format!("{waiting} more waiting")));
+                }
+                ui.add_space(ui::S3);
+                if cancel {
+                    self.import_queue.clear();
+                    job.cancel();
+                }
+            }
             if count == 0 {
                 ui.label(ui::muted(
-                    "No recordings yet. They appear here when you press Stop.",
+                    "No recordings yet. They appear here when you press Stop, or import an \
+                     audio or video file.",
                 ));
                 return;
             }
@@ -2287,6 +2436,7 @@ impl eframe::App for App {
         self.consent_modal(ctx);
         self.close_modal(ctx);
         self.delete_modal(ctx);
+        self.drop_files(ctx);
 
         if self.recorder.is_some()
             || self.saving.is_some()
@@ -2300,7 +2450,11 @@ impl eframe::App for App {
             } else {
                 REFRESH
             });
-        } else if self.job.is_some() || self.download.is_some() || !self.queue.is_empty() {
+        } else if self.job.is_some()
+            || self.download.is_some()
+            || !self.queue.is_empty()
+            || self.import.is_some()
+        {
             ctx.request_repaint_after(REFRESH_BACKGROUND);
         }
     }
@@ -2478,6 +2632,7 @@ fn dev_options() -> DevOptions {
         rename: value("--rename"),
         edit_person: value("--edit-person").and_then(|v| v.parse().ok()),
         delete: args.iter().any(|a| a == "--delete"),
+        import: value("--import").map(PathBuf::from),
     }
 }
 

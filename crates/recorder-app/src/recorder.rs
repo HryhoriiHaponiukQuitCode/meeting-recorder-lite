@@ -205,7 +205,7 @@ impl Drop for Recorder {
     }
 }
 
-fn os_info() -> OsInfo {
+pub(crate) fn os_info() -> OsInfo {
     let info = os_info::get();
     OsInfo {
         family: std::env::consts::OS.to_string(),

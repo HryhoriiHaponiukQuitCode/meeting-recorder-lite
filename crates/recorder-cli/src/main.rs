@@ -94,6 +94,9 @@ enum Cmd {
     Devices,
     /// Close sessions left open by a crash.
     Recover,
+    /// Import an audio or video file (MP3, M4A, MP4, WAV, FLAC, Ogg, Opus…)
+    /// as a recording; prints its folder.
+    Import { file: PathBuf },
     /// Decode a session and show durations and channel levels.
     Verify {
         session: PathBuf,
@@ -203,6 +206,18 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Verify { session, wav } => verify(&session, wav),
+        Cmd::Import { file } => {
+            let t = std::time::Instant::now();
+            let dir = recorder_app::import::import(
+                &file,
+                &root,
+                &mut |_| {},
+                &std::sync::atomic::AtomicBool::new(false),
+            )?;
+            eprintln!("imported in {:.1} s", t.elapsed().as_secs_f64());
+            println!("{}", dir.display());
+            Ok(())
+        }
         Cmd::Transcribe {
             session,
             quality,

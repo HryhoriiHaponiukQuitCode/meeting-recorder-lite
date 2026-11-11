@@ -315,6 +315,8 @@ pub enum Icon {
     Pencil,
     /// Delete.
     Trash,
+    /// Add (import a file).
+    Plus,
 }
 
 /// Icons are drawn, not taken from a font, so they look the same with every
@@ -372,6 +374,10 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
                 painter.circle_filled(c + vec2(-6.0, dy), 1.6, color);
                 line(vec2(-2.5, dy), vec2(7.0, dy));
             }
+        }
+        Icon::Plus => {
+            line(vec2(-5.5, 0.0), vec2(5.5, 0.0));
+            line(vec2(0.0, -5.5), vec2(0.0, 5.5));
         }
         Icon::Trash => {
             // Lid with a handle, then a can narrowing to the bottom with

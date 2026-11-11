@@ -2,6 +2,7 @@
 //! recording session (capture → engine → disk) on its own thread, reports
 //! status and user-facing notices, and owns paths, settings and logging.
 
+pub mod import;
 pub mod logging;
 mod monitor;
 pub mod paths;
