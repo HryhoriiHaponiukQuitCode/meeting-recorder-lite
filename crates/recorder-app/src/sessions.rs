@@ -6,7 +6,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use recorder_core::manifest::{self, Manifest, Status};
+use recorder_core::manifest::{self, Manifest, Status, TranscriptStatus};
+use recorder_transcribe::checkpoint::PARTIAL_FILE;
+use recorder_transcribe::output::{JSON_FILE, SRT_FILE, TXT_FILE};
 
 use crate::transcription::{TranscriptState, transcript_state_of};
 
@@ -94,6 +96,65 @@ pub fn set_title(dir: &Path, name: &str) -> io::Result<()> {
     let tmp = dir.join(format!("{TITLE_FILE}.tmp"));
     fs::write(&tmp, format!("{name}\n"))?;
     fs::rename(&tmp, &path)
+}
+
+/// Moves `paths` to the system Trash (Recycle Bin on Windows), so a
+/// deletion can be undone there.
+fn to_trash(paths: &[PathBuf]) -> io::Result<()> {
+    trash::delete_all(paths).map_err(|e| io::Error::other(e.to_string()))
+}
+
+fn busy(dir: &Path) -> io::Result<Manifest> {
+    let m = Manifest::load(dir)?;
+    if m.status == Status::Recording {
+        return Err(io::Error::other("the recording is still going on"));
+    }
+    if m.transcript
+        .as_ref()
+        .is_some_and(|t| t.status == TranscriptStatus::Running)
+    {
+        return Err(io::Error::other("the recording is being transcribed"));
+    }
+    Ok(m)
+}
+
+/// Deletes the transcript of the recording in `dir` (its text, subtitles,
+/// JSON and an interrupted run's checkpoint go to the Trash); the audio
+/// stays and can be transcribed again. Refused while it is recorded or
+/// transcribed.
+pub fn delete_transcript(dir: &Path) -> io::Result<()> {
+    delete_transcript_with(dir, to_trash)
+}
+
+fn delete_transcript_with(
+    dir: &Path,
+    remove: impl Fn(&[PathBuf]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut m = busy(dir)?;
+    let files: Vec<PathBuf> = [TXT_FILE, JSON_FILE, SRT_FILE, PARTIAL_FILE]
+        .iter()
+        .map(|f| dir.join(f))
+        .filter(|p| p.exists())
+        .collect();
+    if !files.is_empty() {
+        remove(&files)?;
+    }
+    m.transcript = None;
+    m.save(dir)
+}
+
+/// Deletes the whole recording in `dir` (audio, transcript, name): its
+/// folder goes to the Trash. Refused while it is recorded or transcribed.
+pub fn delete_recording(dir: &Path) -> io::Result<()> {
+    delete_recording_with(dir, to_trash)
+}
+
+fn delete_recording_with(
+    dir: &Path,
+    remove: impl Fn(&[PathBuf]) -> io::Result<()>,
+) -> io::Result<()> {
+    busy(dir)?;
+    remove(&[dir.to_path_buf()])
 }
 
 pub fn list(root: &Path) -> Vec<SessionInfo> {
@@ -188,6 +249,68 @@ mod tests {
             });
         }
         m.save(&dir).unwrap();
+    }
+
+    /// Deletes for real instead of moving to the Trash (tests must not fill
+    /// the user's Trash).
+    fn gone(paths: &[PathBuf]) -> io::Result<()> {
+        for p in paths {
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)?;
+            } else {
+                std::fs::remove_file(p)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transcripts_and_recordings_can_be_deleted_but_not_while_busy() {
+        use recorder_core::manifest::TranscriptInfo;
+        let root = std::env::temp_dir().join(format!("mr-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        session(&root, "call", 5, Status::Completed, 60_000);
+        let dir = root.join("call");
+        std::fs::write(dir.join("part_0001.ogg"), b"audio").unwrap();
+        for f in [TXT_FILE, JSON_FILE, SRT_FILE] {
+            std::fs::write(dir.join(f), b"text").unwrap();
+        }
+        set_title(&dir, "Нарада").unwrap();
+        let mut m = Manifest::load(&dir).unwrap();
+        m.transcript = Some(TranscriptInfo {
+            status: TranscriptStatus::Running,
+            updated_at_utc: Utc::now(),
+            engine: String::new(),
+            model: String::new(),
+            files: vec![],
+            error: None,
+        });
+        m.save(&dir).unwrap();
+        // Being transcribed: refused, nothing touched.
+        assert!(delete_transcript_with(&dir, gone).is_err());
+        assert!(delete_recording_with(&dir, gone).is_err());
+        assert!(dir.join(TXT_FILE).exists());
+        m.transcript.as_mut().unwrap().status = TranscriptStatus::Done;
+        m.save(&dir).unwrap();
+        assert!(matches!(info(&dir).unwrap().transcript, TranscriptState::Done(_)));
+        // The transcript goes; the audio and the name stay.
+        delete_transcript_with(&dir, gone).unwrap();
+        for f in [TXT_FILE, JSON_FILE, SRT_FILE] {
+            assert!(!dir.join(f).exists(), "{f}");
+        }
+        let s = info(&dir).unwrap();
+        assert_eq!(s.transcript, TranscriptState::None);
+        assert!(s.transcribable() && s.title.as_deref() == Some("Нарада"));
+        assert!(dir.join("part_0001.ogg").exists());
+        // Twice is fine (nothing left to remove).
+        delete_transcript_with(&dir, gone).unwrap();
+        // The whole recording goes.
+        delete_recording_with(&dir, gone).unwrap();
+        assert!(!dir.exists() && list(&root).is_empty());
+        // Being recorded: refused.
+        session(&root, "now", 1, Status::Recording, 4_000);
+        assert!(delete_recording_with(&root.join("now"), gone).is_err());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

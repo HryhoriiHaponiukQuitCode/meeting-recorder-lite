@@ -22,6 +22,7 @@ pub const INK_MUTED: Color32 = Color32::from_rgb(0x8a, 0x94, 0xa6);
 pub const BLUE: Color32 = Color32::from_rgb(0x17, 0x74, 0xf0);
 const BLUE_HOVER: Color32 = Color32::from_rgb(0x0e, 0x63, 0xd6);
 pub const RED: Color32 = Color32::from_rgb(0xe0, 0x3b, 0x3b);
+const RED_HOVER: Color32 = Color32::from_rgb(0xc8, 0x2c, 0x2c);
 const AMBER: Color32 = Color32::from_rgb(0xf3, 0xa7, 0x12);
 
 /// Spacing scale (4 px base).
@@ -312,6 +313,8 @@ pub enum Icon {
     Info,
     /// Rename.
     Pencil,
+    /// Delete.
+    Trash,
 }
 
 /// Icons are drawn, not taken from a font, so they look the same with every
@@ -369,6 +372,31 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
                 painter.circle_filled(c + vec2(-6.0, dy), 1.6, color);
                 line(vec2(-2.5, dy), vec2(7.0, dy));
             }
+        }
+        Icon::Trash => {
+            // Lid with a handle, then a can narrowing to the bottom with
+            // two ribs.
+            line(vec2(-6.5, -4.5), vec2(6.5, -4.5));
+            painter.add(Shape::line(
+                vec![
+                    c + vec2(-2.5, -4.5),
+                    c + vec2(-2.5, -6.5),
+                    c + vec2(2.5, -6.5),
+                    c + vec2(2.5, -4.5),
+                ],
+                stroke,
+            ));
+            painter.add(Shape::line(
+                vec![
+                    c + vec2(-5.0, -4.5),
+                    c + vec2(-4.0, 6.5),
+                    c + vec2(4.0, 6.5),
+                    c + vec2(5.0, -4.5),
+                ],
+                stroke,
+            ));
+            line(vec2(-1.5, -1.5), vec2(-1.2, 3.5));
+            line(vec2(1.5, -1.5), vec2(1.2, 3.5));
         }
         Icon::Pencil => {
             // A pencil slanted up to the right: tip at the lower left.
@@ -548,6 +576,18 @@ pub fn primary(
         icon: Color32::WHITE,
     };
     icon_button_with_text(ui, text, leading, trailing, look, Size::of(full_width))
+}
+
+/// The red action that deletes something (in a confirmation).
+pub fn danger(ui: &mut Ui, text: &str) -> Response {
+    let look = ButtonLook {
+        fill: RED,
+        hover: RED_HOVER,
+        border: None,
+        text: Color32::WHITE,
+        icon: Color32::WHITE,
+    };
+    icon_button_with_text(ui, text, None, None, look, Size::of(false))
 }
 
 /// A compact blue action (next to [`outline_small`]).

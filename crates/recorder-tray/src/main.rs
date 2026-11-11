@@ -145,6 +145,9 @@ struct DevOptions {
     /// `--edit-person <n>`: the name field of the shown transcript's n-th
     /// participant (from 1).
     edit_person: Option<usize>,
+    /// `--delete`: the delete confirmation for the shown recording (it
+    /// deletes nothing by itself).
+    delete: bool,
 }
 
 struct App {
@@ -195,6 +198,8 @@ struct App {
     renaming: Option<Renaming>,
     /// A participant being renamed in the shown transcript.
     person_edit: Option<reader::PersonEdit>,
+    /// The recording whose delete confirmation is open.
+    confirm_delete: Option<PathBuf>,
     /// The last recording's name, if it was given one.
     last_title: Option<String>,
 }
@@ -253,6 +258,7 @@ impl App {
             shown: None,
             renaming: None,
             person_edit: None,
+            confirm_delete: None,
             last_title: None,
             settings,
         };
@@ -263,6 +269,9 @@ impl App {
         }
         if let (Some(n), Some(Ok(t))) = (dev.edit_person, &app.reader.transcript) {
             app.person_edit = t.people.get(n.saturating_sub(1)).map(reader::PersonEdit::of);
+        }
+        if dev.delete {
+            app.confirm_delete = dev.show.clone();
         }
         if let (Some(dir), Some(text)) = (dev.show.clone(), dev.rename) {
             app.renaming = Some(Renaming {
@@ -1535,14 +1544,21 @@ impl App {
             } else {
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
+                            || self.queue.contains(&info.dir);
+                        // Not while it is recorded or transcribed.
+                        if !info.recording
+                            && !busy
+                            && ui::icon_button(ui, ui::Icon::Trash, "Delete…").clicked()
+                        {
+                            self.confirm_delete = Some(info.dir.clone());
+                        }
                         if ui::icon_button(ui, ui::Icon::Folder, REVEAL).clicked() {
                             action = Some(TranscriptAction::Reveal(info.dir.clone()));
                         }
                         if ui::icon_button(ui, ui::Icon::Pencil, "Rename").clicked() {
                             self.start_renaming(&info);
                         }
-                        let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
-                            || self.queue.contains(&info.dir);
                         match (&info.transcript, busy) {
                             (TranscriptState::Done(txt), false) => {
                                 if ui::outline_small(ui, "Open file", None)
@@ -2079,6 +2095,102 @@ impl App {
         }
     }
 
+    /// "Delete the transcript, or the whole recording?" Both go to the Trash.
+    fn delete_modal(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.confirm_delete.clone() else {
+            return;
+        };
+        let Some(info) = sessions::info(&dir) else {
+            self.confirm_delete = None;
+            return;
+        };
+        let has_transcript = matches!(info.transcript, TranscriptState::Done(_))
+            || matches!(info.transcript, TranscriptState::Failed(_));
+        let name = info.title.clone().unwrap_or_else(|| when(info.started));
+        let (mut transcript, mut recording) = (false, false);
+        let response = egui::Modal::new(egui::Id::new("delete"))
+            .frame(ui::modal_frame())
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                modal_title(ui, &format!("Delete “{name}”?"));
+                ui.label(
+                    RichText::new(if has_transcript {
+                        "Delete only the transcript (the audio stays and can be transcribed \
+                         again), or the whole recording with its audio. Either goes to the Trash."
+                    } else {
+                        "The whole recording with its audio goes to the Trash."
+                    })
+                    .color(ui::INK_SECONDARY),
+                );
+                ui.add_space(ui::S4);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    recording = ui::danger(ui, "Delete recording").clicked();
+                    if has_transcript {
+                        transcript = ui::outline(ui, "Delete transcript", None, false).clicked();
+                    }
+                    if ui::outline(ui, "Cancel", None, false).clicked() {
+                        self.confirm_delete = None;
+                    }
+                });
+            });
+        if response.should_close() {
+            self.confirm_delete = None;
+        }
+        if transcript || recording {
+            self.confirm_delete = None;
+            self.delete(&dir, recording);
+        }
+    }
+
+    /// Deletes the transcript or the whole recording in `dir` and shows the
+    /// lists without it at once.
+    fn delete(&mut self, dir: &Path, recording: bool) {
+        let result = if recording {
+            sessions::delete_recording(dir)
+        } else {
+            sessions::delete_transcript(dir)
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), recording, "deleted");
+                self.message = Some(Message {
+                    text: if recording {
+                        "The recording is moved to the Trash.".into()
+                    } else {
+                        "The transcript is moved to the Trash.".into()
+                    },
+                    problem: false,
+                });
+                self.renaming = None;
+                self.person_edit = None;
+                if recording {
+                    self.sessions.retain(|s| s.dir != dir);
+                    if self.reader.dir() == Some(dir) {
+                        self.reader.select(None);
+                    }
+                    if self.last.as_ref().is_some_and(|l| l.dir == dir) {
+                        self.last = sessions::latest(&self.settings.recordings_dir()).map(|s| {
+                            LastRecording {
+                                dir: s.dir,
+                                started: s.started,
+                                seconds: s.seconds,
+                            }
+                        });
+                    }
+                } else {
+                    self.reader.reload();
+                }
+                self.check_disk();
+            }
+            Err(e) => {
+                self.message = Some(Message {
+                    text: format!("Cannot delete: {e}"),
+                    problem: true,
+                });
+            }
+        }
+    }
+
     fn close_modal(&mut self, ctx: &egui::Context) {
         if !self.confirm_close {
             return;
@@ -2174,6 +2286,7 @@ impl eframe::App for App {
         }
         self.consent_modal(ctx);
         self.close_modal(ctx);
+        self.delete_modal(ctx);
 
         if self.recorder.is_some()
             || self.saving.is_some()
@@ -2364,6 +2477,7 @@ fn dev_options() -> DevOptions {
         find: value("--find"),
         rename: value("--rename"),
         edit_person: value("--edit-person").and_then(|v| v.parse().ok()),
+        delete: args.iter().any(|a| a == "--delete"),
     }
 }
 
