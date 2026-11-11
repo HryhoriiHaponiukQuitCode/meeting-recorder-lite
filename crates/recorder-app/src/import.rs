@@ -17,9 +17,9 @@
 //!   name becomes the recording's name.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use recorder_core::SAMPLE_RATE;
@@ -35,7 +35,7 @@ use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 
 use crate::sessions;
@@ -119,19 +119,59 @@ fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-/// Mono audio at any rate, block by block; `total_s` when the length is
-/// known (for the progress).
+/// Mono audio at any rate, block by block.
 trait Source {
     fn rate(&self) -> u32;
-    fn total_s(&self) -> Option<f64>;
+    /// How much of the file is read, 0..1, after `decoded_s` seconds of
+    /// sound: by time when the length is known, else by bytes.
+    fn share(&self, decoded_s: f64) -> Option<f64>;
     /// Appends the next mono samples to `out`; `false` at the end.
     fn next(&mut self, out: &mut Vec<f32>) -> io::Result<bool>;
+}
+
+fn time_share(decoded_s: f64, total_s: Option<f64>) -> Option<f64> {
+    total_s
+        .filter(|&t| t > 0.0)
+        .map(|t| (decoded_s / t).min(1.0))
 }
 
 /// Ogg Opus through our own decoder (already at 16 kHz).
 struct OpusSource {
     reader: PartReader,
+    total_s: Option<f64>,
     buf: Vec<f32>,
+}
+
+/// The length of an Ogg Opus file: the granule position (48 kHz samples)
+/// of its last page, less the pre-skip. Opus headers carry no length, so
+/// without this an import would show 0% until the end.
+fn ogg_opus_seconds(path: &Path, preskip: u16) -> Option<f64> {
+    let mut f = File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    // A page is at most ~64 KiB, so the last whole one is in here.
+    let tail = len.min(1 << 17);
+    f.seek(SeekFrom::Start(len - tail)).ok()?;
+    let mut buf = Vec::with_capacity(tail as usize);
+    f.take(tail).read_to_end(&mut buf).ok()?;
+    // From the end: the last real page header ("OggS", version 0, a whole
+    // page that fits, a set granule). "OggS" inside sound data fails these.
+    let mut end = buf.len();
+    while let Some(at) = buf[..end].windows(4).rposition(|w| w == b"OggS") {
+        end = at;
+        let Some(head) = buf.get(at..at + 27) else {
+            continue;
+        };
+        let segs = head[26] as usize;
+        let Some(table) = buf.get(at + 27..at + 27 + segs) else {
+            continue;
+        };
+        let body: usize = table.iter().map(|&s| s as usize).sum();
+        let granule = i64::from_le_bytes(head[6..14].try_into().ok()?);
+        if head[4] == 0 && at + 27 + segs + body <= buf.len() && granule > 0 {
+            return Some((granule - preskip as i64).max(0) as f64 / 48_000.0);
+        }
+    }
+    None
 }
 
 impl Source for OpusSource {
@@ -139,8 +179,8 @@ impl Source for OpusSource {
         SAMPLE_RATE
     }
 
-    fn total_s(&self) -> Option<f64> {
-        None
+    fn share(&self, decoded_s: f64) -> Option<f64> {
+        time_share(decoded_s, self.total_s)
     }
 
     fn next(&mut self, out: &mut Vec<f32>) -> io::Result<bool> {
@@ -163,13 +203,55 @@ struct SymphoniaSource {
     track: u32,
     rate: u32,
     total_s: Option<f64>,
+    /// Bytes read so far and the file's size, for files that do not say
+    /// their length (MP3 without a header, some streams).
+    read: Arc<AtomicU64>,
+    size: u64,
     buf: Vec<f32>,
+}
+
+/// A file that counts how far it has been read.
+struct Counted {
+    file: File,
+    at: Arc<AtomicU64>,
+}
+
+impl Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.file.read(buf)?;
+        self.at.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+impl Seek for Counted {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let at = self.file.seek(pos)?;
+        self.at.store(at, Ordering::Relaxed);
+        Ok(at)
+    }
+}
+
+impl MediaSource for Counted {
+    fn is_seekable(&self) -> bool {
+        self.file.is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.file.byte_len()
+    }
 }
 
 impl SymphoniaSource {
     fn open(path: &Path) -> io::Result<Self> {
         let file = File::open(path)?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let size = file.metadata()?.len();
+        let read = Arc::new(AtomicU64::new(0));
+        let counted = Counted {
+            file,
+            at: read.clone(),
+        };
+        let mss = MediaSourceStream::new(Box::new(counted), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -203,6 +285,8 @@ impl SymphoniaSource {
             decoder,
             rate,
             total_s,
+            read,
+            size,
             buf: Vec::new(),
         })
     }
@@ -213,8 +297,11 @@ impl Source for SymphoniaSource {
         self.rate
     }
 
-    fn total_s(&self) -> Option<f64> {
-        self.total_s
+    fn share(&self, decoded_s: f64) -> Option<f64> {
+        time_share(decoded_s, self.total_s).or_else(|| {
+            (self.size > 0)
+                .then(|| (self.read.load(Ordering::Relaxed) as f64 / self.size as f64).min(1.0))
+        })
     }
 
     fn next(&mut self, out: &mut Vec<f32>) -> io::Result<bool> {
@@ -261,8 +348,10 @@ fn is_ogg_opus(path: &Path) -> bool {
 
 fn open(path: &Path) -> io::Result<Box<dyn Source>> {
     if is_ogg_opus(path) {
+        let reader = PartReader::open(path)?;
         return Ok(Box::new(OpusSource {
-            reader: PartReader::open(path)?,
+            total_s: ogg_opus_seconds(path, reader.preskip()),
+            reader,
             buf: Vec::new(),
         }));
     }
@@ -387,7 +476,6 @@ pub fn import(
         writer.event("imported", serde_json::json!({ "file": name }))?;
 
         let mut resampler = To16k::new(source.rate());
-        let total = source.total_s();
         let (mut block, mut mono, mut frame) = (Vec::new(), Vec::new(), vec![0.0f32; 2 * FRAME]);
         let mut done_in = 0usize;
         let mut written = 0usize;
@@ -411,10 +499,8 @@ pub fn import(
                 written += 1;
             }
             mono.drain(..tail);
-            if let Some(t) = total
-                && t > 0.0
-            {
-                progress((done_in as f64 / source.rate() as f64 / t).min(1.0) as f32);
+            if let Some(share) = source.share(done_in as f64 / source.rate() as f64) {
+                progress(share as f32);
             }
             if !more {
                 break;
@@ -505,6 +591,30 @@ mod tests {
         let info = sessions::info(&dir).unwrap();
         assert!(info.transcribable() && !info.recording);
         assert!(seen.last() == Some(&1.0));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Opus headers carry no length: it comes from the last page, so the
+    /// progress moves instead of sitting at 0% until the end.
+    #[test]
+    fn an_opus_file_shows_its_progress() {
+        let root = temp("opus");
+        let file = root.join("call.wav");
+        wav(&file, 16_000, 1, 12.0);
+        let first = import(&file, &root, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+        let m = Manifest::load(&first).unwrap();
+        let voice = root.join("voice message.opus");
+        fs::copy(first.join(&m.parts[0].file), &voice).unwrap();
+
+        let reader = PartReader::open(&voice).unwrap();
+        let secs = ogg_opus_seconds(&voice, reader.preskip()).unwrap();
+        assert!((secs - 12.0).abs() < 0.05, "{secs} s");
+
+        let mut seen = Vec::new();
+        import(&voice, &root, &mut |p| seen.push(p), &AtomicBool::new(false)).unwrap();
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]), "never goes back");
+        assert!(seen.iter().any(|p| (0.3..0.7).contains(p)), "{seen:?}");
+        assert_eq!(seen.last(), Some(&1.0));
         fs::remove_dir_all(root).ok();
     }
 
