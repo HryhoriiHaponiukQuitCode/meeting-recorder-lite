@@ -157,6 +157,8 @@ pub struct JobState {
     pub total_s: f64,
     /// The model is loaded and audio is being processed.
     pub started: bool,
+    /// When that happened (for the time left).
+    pub started_at: Option<std::time::Instant>,
     pub done: Option<Vec<String>>,
     pub error: Option<String>,
     pub stdout_closed: bool,
@@ -226,6 +228,7 @@ impl TranscriptionJob {
                     match m {
                         Message::Started { audio_s } => {
                             st.started = true;
+                            st.started_at = Some(std::time::Instant::now());
                             st.total_s = audio_s;
                         }
                         Message::Progress { done_s, total_s } => {

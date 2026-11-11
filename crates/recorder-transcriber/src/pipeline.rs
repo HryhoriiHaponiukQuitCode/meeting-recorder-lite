@@ -431,9 +431,10 @@ impl Progress {
     }
 }
 
-/// How the progress bar is split between the passes, from measured times:
-/// Whisper takes about 3 times as long as Parakeet; the voice prints about
-/// half as long as Parakeet (a minute per hour of call on 2 threads).
+/// How the progress bar is split between the passes, from measured times
+/// (Parakeet Ultra in full precision): Whisper takes about 4 times as long
+/// as Parakeet; the voice prints of both channels about as long as
+/// Parakeet (half each).
 struct Shares {
     parakeet: f64,
     whisper: f64,
@@ -442,11 +443,11 @@ struct Shares {
 impl Shares {
     fn new(q: Quality, voices: bool) -> Self {
         let (p, w) = if q.needs_whisper() {
-            (1.0, 3.0)
+            (1.0, 4.0)
         } else {
             (1.0, 0.0)
         };
-        let v = if voices { 0.5 } else { 0.0 };
+        let v = if voices { 1.0 } else { 0.0 };
         let total = p + w + v;
         Self {
             parakeet: p / total,

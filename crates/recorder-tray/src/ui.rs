@@ -807,6 +807,24 @@ pub fn meter(ui: &mut Ui, level: f32) {
 }
 
 /// A thin blue progress bar, `fraction` in 0..=1.
+/// A bar for work whose amount is not known yet: a segment sweeping across.
+pub fn progress_busy(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3, TRACK);
+    let t = ui.input(|i| i.time) as f32;
+    let w = rect.width() * 0.3;
+    let x = rect.left() - w + (rect.width() + w) * ((t / 1.6).fract());
+    let seg = egui::Rect::from_min_max(
+        egui::pos2(x.max(rect.left()), rect.top()),
+        egui::pos2((x + w).min(rect.right()), rect.bottom()),
+    );
+    if seg.width() > 0.0 {
+        painter.rect_filled(seg, 3, BLUE);
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+}
+
 pub fn progress(ui: &mut Ui, fraction: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
     let painter = ui.painter();

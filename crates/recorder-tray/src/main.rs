@@ -1236,14 +1236,21 @@ impl App {
                 action = Some(TranscriptAction::Stop);
             }
             let st = job.state();
-            let pct = if st.started && st.total_s > 0.0 {
-                format!("{:.0}%", st.done_s / st.total_s * 100.0)
-            } else {
-                "Starting…".into()
+            let fraction = (st.total_s > 0.0).then(|| st.done_s / st.total_s);
+            let pct = match fraction {
+                Some(f) if st.started => format!("{:.0}%", f * 100.0),
+                _ => "Loading model…".into(),
             };
             use recorder_transcribe::heat::Heat;
             let (text, hint) = match st.heat {
-                Heat::Normal => (pct, None),
+                // The time left, once there is enough to go by.
+                Heat::Normal => match (fraction, st.started_at) {
+                    (Some(f), Some(t0)) if f >= 0.03 && t0.elapsed().as_secs() >= 20 => {
+                        let left = t0.elapsed().as_secs_f64() * (1.0 - f) / f;
+                        (format!("{pct} · {}", time_left(left)), None)
+                    }
+                    _ => (pct, None),
+                },
                 Heat::Warm => (
                     format!("{pct} · resting"),
                     Some("The Mac is warm: transcription takes breaks to cool it down."),
@@ -1287,11 +1294,12 @@ impl App {
         action
     }
 
-    /// Progress of the running transcription of `dir`, if any.
-    fn job_progress(&self, dir: &Path) -> Option<f32> {
+    /// Progress of the running transcription of `dir`, if any: `None`
+    /// inside while the model loads (the amount of work is not known yet).
+    fn job_progress(&self, dir: &Path) -> Option<Option<f32>> {
         let job = self.job.as_ref().filter(|j| j.session() == dir)?;
         let st = job.state();
-        Some((st.done_s / st.total_s.max(1e-9)) as f32)
+        Some((st.started && st.total_s > 0.0).then(|| (st.done_s / st.total_s) as f32))
     }
 
     /// Transcript of the last recording: start, progress, open.
@@ -1306,7 +1314,7 @@ impl App {
         });
         let hint = if let Some(p) = self.job_progress(dir) {
             ui.add_space(ui::S1);
-            ui::progress(ui, p);
+            job_bar(ui, p);
             "Runs in the background at low priority and pauses while you record.".to_string()
         } else if queued && self.recorder.is_some() {
             "Starts when the recording ends.".into()
@@ -1490,8 +1498,15 @@ impl App {
         let near = inner.rect_contains_pointer(rect) || selected;
         let done = matches!(s.transcript, TranscriptState::Done(_));
         let controls = s.recording || (s.transcribable() && (!done || busy || queued));
+        // A running transcription shows "12% · ~9 min left" and Stop.
         let reserve = if near && !busy && !queued { 44.0 } else { 0.0 }
-            + if controls { 120.0 } else { 0.0 };
+            + if busy {
+                220.0
+            } else if controls {
+                120.0
+            } else {
+                0.0
+            };
         inner.horizontal(|ui| {
             ui.set_min_height(52.0);
             ui.vertical(|ui| {
@@ -1544,7 +1559,7 @@ impl App {
         });
         if let Some(p) = progress {
             inner.add_space(ui::S1);
-            ui::progress(&mut inner, p);
+            job_bar(&mut inner, p);
         }
         (action, rect)
     }
@@ -1776,7 +1791,7 @@ impl App {
             let queued = self.queue.contains(&info.dir);
             match (&self.reader.transcript, job) {
                 (_, Some(p)) => {
-                    ui::progress(ui, p);
+                    job_bar(ui, p);
                     ui.add_space(ui::S2);
                     ui.label(ui::muted(
                         "Transcribing in the background at low priority. The text appears here \
@@ -2475,6 +2490,24 @@ impl Drop for App {
 }
 
 /// The title of the section column, with something on the right.
+/// A transcription's bar: sweeping while the model loads, then filling.
+fn job_bar(ui: &mut egui::Ui, progress: Option<f32>) {
+    match progress {
+        Some(p) => ui::progress(ui, p),
+        None => ui::progress_busy(ui),
+    }
+}
+
+/// "~12 min left", "<1 min left".
+fn time_left(seconds: f64) -> String {
+    let min = (seconds / 60.0).round();
+    if min < 1.0 {
+        "<1 min left".into()
+    } else {
+        format!("~{min:.0} min left")
+    }
+}
+
 fn section_title(ui: &mut egui::Ui, title: &str, right: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.set_min_height(36.0);
