@@ -24,10 +24,23 @@
 
 ## Встановлення
 
-Готові інсталятори є в артефактах [GitHub Actions](../../actions) (`meeting-recorder-macos-arm64`, `meeting-recorder-windows-x64`):
+**macOS 13+ (Apple silicon, M1 і новіші)** — одна команда в Терміналі. Вона ставить останній реліз у «Програми» або оновлює наявний. Записи, налаштування й модель лишаються:
 
-- **macOS 13+:** `Meeting Recorder_<версія>_aarch64.dmg`. Перетягніть програму в «Програми»; перший запуск — правий клік → «Відкрити».
-- **Windows 10/11:** `meeting-recorder_<версія>_x64-setup.exe`. Встановлюється для поточного користувача, права адміністратора не потрібні.
+```bash
+curl -fsSL https://raw.githubusercontent.com/HryhoriiHaponiukQuitCode/meeting-recorder-lite/main/scripts/install-macos.sh | bash
+```
+
+Можна й вручну: `.dmg` зі сторінки [Releases](../../releases/latest), програму перетягнути в «Програми». Програма підписана без сертифіката Apple Developer, тож macOS блокує файл, завантажений браузером. Перший запуск: **System Settings → Privacy & Security → Open Anyway** (або `xattr -dr com.apple.quarantine "/Applications/Meeting Recorder.app"`). Команда вище цього не потребує.
+
+**Windows 10/11** — інсталятор `…_x64-setup.exe` зі сторінки [Releases](../../releases/latest), або в PowerShell:
+
+```powershell
+$a = (irm https://api.github.com/repos/HryhoriiHaponiukQuitCode/meeting-recorder-lite/releases/latest).assets | ? name -like '*x64-setup.exe' | select -First 1; iwr $a.browser_download_url -OutFile "$env:TEMP\$($a.name)"; & "$env:TEMP\$($a.name)"
+```
+
+Встановлюється для поточного користувача, права адміністратора не потрібні. Інсталятор не підписаний: якщо SmartScreen попередить, «More info → Run anyway».
+
+Збірки кожного коміту — в артефактах [GitHub Actions](../../actions) (`meeting-recorder-macos-arm64`, `meeting-recorder-windows-x64`).
 
 Відкрийте **Meeting Recorder** з «Програм» (macOS) або меню «Пуск» (Windows): **Start recording → Stop → Show in Finder** (інтерфейс англійською).
 
