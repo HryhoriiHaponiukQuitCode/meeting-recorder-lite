@@ -55,6 +55,9 @@ pub struct VoiceSettings {
     pub window_s: f64,
     pub step_s: f64,
     pub threshold: f32,
+    /// On the microphone (absent in transcripts made before it differed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_threshold: Option<f32>,
 }
 
 impl VoiceSettings {
@@ -64,6 +67,7 @@ impl VoiceSettings {
             window_s: crate::voices::WINDOW_S,
             step_s: crate::voices::STEP_S,
             threshold: crate::voices::THRESHOLD,
+            mic_threshold: Some(crate::voices::MIC_THRESHOLD),
         }
     }
 }

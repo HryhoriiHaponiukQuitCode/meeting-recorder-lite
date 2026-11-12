@@ -24,8 +24,16 @@ pub const WINDOW_S: f64 = 1.5;
 pub const STEP_S: f64 = 0.75;
 /// Shorter speech segments get no print of their own.
 pub const MIN_SEGMENT_S: f64 = 0.5;
-/// Cosine distance at which clusters stop merging.
+/// Cosine distance at which clusters stop merging (the system audio).
 pub const THRESHOLD: f32 = 0.62;
+/// The same on the microphone. In a room the voices reach it from
+/// different distances, with the room's echo, and one person's prints lie
+/// further apart than on the clean system audio: at 0.62 the third of three
+/// people at a meeting (Іван, 93 s of speech) fell apart into small
+/// clusters and joined the other two. He stands apart from 0.66; at 0.70 a
+/// fourth, spurious voice appears. 0.68 keeps the other recordings as they
+/// were (one voice on calls with headphones).
+pub const MIC_THRESHOLD: f32 = 0.68;
 /// Above this many windows the clustering runs on an even sample and the
 /// rest go to the nearest voice (memory and time grow with the square).
 pub const MAX_CLUSTER_POINTS: usize = 3000;
@@ -39,6 +47,10 @@ pub const MIN_VOICE_SHARE: f64 = 0.03;
 /// microphone talks for minutes (262 s and more on the user's room
 /// meetings). A count of words (25 before) let the short ones through.
 pub const MIC_MIN_SPEECH_S: f64 = 30.0;
+/// A word counts for at most this long towards [`MIC_MIN_SPEECH_S`]: the
+/// recognizer's word times sometimes span the silence after a word ("Так,"
+/// of 8.6 s), and 34 lone words then made 69 s.
+pub const MAX_WORD_S: f64 = 1.0;
 
 /// Windows `(start, length)` in samples inside the speech segments; a
 /// segment shorter than a window is one window when long enough.
@@ -200,7 +212,12 @@ fn nearest(p: &[f32], cents: &[Vec<f32>], allowed: &[bool]) -> usize {
 /// time are folded into the nearest other voice. With a single voice nothing is set, so
 /// the transcript keeps plain "Others". Returns the number of voices (0 for
 /// one).
-pub fn assign(words: &mut [Word], windows: &[(u64, usize)], prints: &[Vec<f32>]) -> u32 {
+pub fn assign(
+    words: &mut [Word],
+    windows: &[(u64, usize)],
+    prints: &[Vec<f32>],
+    threshold: f32,
+) -> u32 {
     for w in words.iter_mut() {
         w.voice = None;
     }
@@ -224,7 +241,7 @@ pub fn assign(words: &mut [Word], windows: &[(u64, usize)], prints: &[Vec<f32>])
             .collect();
     }
     let sample: Vec<Vec<f32>> = basis.iter().map(|&i| points[i].clone()).collect();
-    let sample_labels = cluster(&sample, THRESHOLD);
+    let sample_labels = cluster(&sample, threshold);
     let k = count(&sample_labels);
     // Voices of a few stray full windows go before the short bits are
     // shared out (fillers would otherwise flock to them).
@@ -298,7 +315,7 @@ pub fn fold_minor(words: &mut [Word], min_speech_s: f64) -> u32 {
     let mut count: Vec<(u32, usize, f64)> = Vec::new();
     for w in words.iter() {
         if let Some(v) = w.voice {
-            let s = (w.end - w.start).max(0.0);
+            let s = (w.end - w.start).clamp(0.0, MAX_WORD_S);
             match count.iter_mut().find(|(x, ..)| *x == v) {
                 Some(c) => {
                     c.1 += 1;
@@ -484,9 +501,13 @@ mod tests {
         say(377, 0.6, 1, &mut ws); // the user: ~226 s
         say(38, 0.3, 2, &mut ws); // replies in another tone: ~11 s
         say(135, 0.5, 3, &mut ws); // someone else in the room: ~68 s
+        // Lone words whose times span the silence after them: 68 s as
+        // timed, but 25 s at one second a word.
+        say(25, 2.7, 4, &mut ws);
         assert_eq!(fold_minor(&mut ws, MIC_MIN_SPEECH_S), 2);
         assert!(ws[377..415].iter().all(|w| w.voice == Some(1)));
-        assert!(ws[415..].iter().all(|w| w.voice == Some(2)));
+        assert!(ws[415..550].iter().all(|w| w.voice == Some(2)));
+        assert!(ws[550..].iter().all(|w| w.voice == Some(1)));
     }
 
     #[test]
@@ -543,7 +564,7 @@ mod tests {
             p.push(print(axis, i));
         }
         let mut words = words_for(&w);
-        assert_eq!(assign(&mut words, &w, &p), 2);
+        assert_eq!(assign(&mut words, &w, &p, THRESHOLD), 2);
         let v: Vec<u32> = words.iter().map(|w| w.voice.unwrap()).collect();
         assert!(v[..20].iter().all(|&x| x == 1), "{v:?}");
         assert!(v[20..].iter().all(|&x| x == 2), "{v:?}");
@@ -557,7 +578,7 @@ mod tests {
             .map(|i| print(if i < 30 { 1 } else { 5 }, i))
             .collect();
         let mut words = words_for(&w[..30]);
-        assert_eq!(assign(&mut words, &w, &p), 0);
+        assert_eq!(assign(&mut words, &w, &p, THRESHOLD), 0);
         assert!(words.iter().all(|w| w.voice.is_none()));
     }
 
@@ -569,7 +590,7 @@ mod tests {
             .map(|i| print(if i < n / 2 { 2 } else { 4 }, i as u64))
             .collect();
         let mut words = words_for(&w);
-        assert_eq!(assign(&mut words, &w, &p), 2);
+        assert_eq!(assign(&mut words, &w, &p, THRESHOLD), 2);
         assert!(words[..n / 2 - 1].iter().all(|w| w.voice == Some(1)));
         assert!(words[n / 2 + 1..].iter().all(|w| w.voice == Some(2)));
     }

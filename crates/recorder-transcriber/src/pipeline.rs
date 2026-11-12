@@ -645,7 +645,12 @@ fn voice_pass(
             pacer.tick(stop)
         })
     })?;
-    let n = assign_outside(words, skip, &kept, &prints);
+    let threshold = if channel == Speaker::Me {
+        voices::MIC_THRESHOLD
+    } else {
+        voices::THRESHOLD
+    };
+    let n = assign_outside(words, skip, &kept, &prints, threshold);
     Ok(if channel == Speaker::Me {
         voices::fold_minor(words, voices::MIC_MIN_SPEECH_S)
     } else {
@@ -670,6 +675,7 @@ fn assign_outside(
     skip: &[(f64, f64)],
     kept: &[(u64, usize)],
     prints: &[Vec<f32>],
+    threshold: f32,
 ) -> u32 {
     let inside = |w: &Word| {
         let mid = (w.start + w.end) / 2.0;
@@ -677,7 +683,7 @@ fn assign_outside(
     };
     let idx: Vec<usize> = (0..words.len()).filter(|&i| !inside(&words[i])).collect();
     let mut sub: Vec<Word> = idx.iter().map(|&i| words[i].clone()).collect();
-    let n = voices::assign(&mut sub, kept, prints);
+    let n = voices::assign(&mut sub, kept, prints, threshold);
     for w in words.iter_mut() {
         w.voice = None;
     }
@@ -791,9 +797,9 @@ pub fn relabel_voices(dir: &Path, opts: &Options) -> Result<(u32, u32)> {
         })
     };
     let (kept, prints) = prints_of(&right, &[])?;
-    doc.others_voices = voices::assign(&mut others, &kept, &prints);
+    doc.others_voices = voices::assign(&mut others, &kept, &prints, voices::THRESHOLD);
     let (kept, prints) = prints_of(&left, &echo)?;
-    assign_outside(&mut me, &echo, &kept, &prints);
+    assign_outside(&mut me, &echo, &kept, &prints, voices::MIC_THRESHOLD);
     doc.me_voices = voices::fold_minor(&mut me, voices::MIC_MIN_SPEECH_S);
     doc.settings.voices = Some(VoiceSettings::current());
     doc.utterances = dialog::merge(
