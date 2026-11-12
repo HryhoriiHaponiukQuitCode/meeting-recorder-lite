@@ -410,7 +410,10 @@ fn draw_icon(painter: &egui::Painter, icon: Icon, c: Pos2, color: Color32) {
             let n = vec2(1.0, 1.0) / 2.0_f32.sqrt() * 2.3;
             let tip = c + vec2(-6.0, 6.0);
             let (a, b) = (tip + d * 3.5, tip + d * 14.5);
-            painter.add(Shape::closed_line(vec![tip, a + n, b + n, b - n, a - n], stroke));
+            painter.add(Shape::closed_line(
+                vec![tip, a + n, b + n, b - n, a - n],
+                stroke,
+            ));
             let cap = b - d * 3.0;
             painter.line_segment([cap + n, cap - n], stroke);
         }
@@ -884,7 +887,8 @@ pub fn progress_busy(ui: &mut Ui) {
     if seg.width() > 0.0 {
         painter.rect_filled(seg, 3, BLUE);
     }
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 pub fn progress(ui: &mut Ui, fraction: f32) {

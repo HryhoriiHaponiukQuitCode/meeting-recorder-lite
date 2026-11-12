@@ -83,10 +83,53 @@ const FOREIGN_LETTERS_SHARE: f64 = 0.2;
 /// not English ("Dobre, co to gdzie to?"), without either it is ("Buenos
 /// Aires").
 const SLAVIC_WORDS: &[&str] = &[
-    "co", "gdzie", "jest", "nie", "tak", "się", "że", "jak", "ale", "bo", "ten", "ta", "mam",
-    "może", "dobre", "dobrze", "dobro", "kak", "što", "je", "sam", "da", "ne", "ni", "ono",
-    "ona", "oni", "mi", "ti", "vi", "smo", "ste", "su", "bude", "tu", "tam", "teraz", "już",
-    "jeszcze", "bardzo", "proszę", "dziękuję", "ja", "ty", "wy", "czy", "kiedy",
+    "co",
+    "gdzie",
+    "jest",
+    "nie",
+    "tak",
+    "się",
+    "że",
+    "jak",
+    "ale",
+    "bo",
+    "ten",
+    "ta",
+    "mam",
+    "może",
+    "dobre",
+    "dobrze",
+    "dobro",
+    "kak",
+    "što",
+    "je",
+    "sam",
+    "da",
+    "ne",
+    "ni",
+    "ono",
+    "ona",
+    "oni",
+    "mi",
+    "ti",
+    "vi",
+    "smo",
+    "ste",
+    "su",
+    "bude",
+    "tu",
+    "tam",
+    "teraz",
+    "już",
+    "jeszcze",
+    "bardzo",
+    "proszę",
+    "dziękuję",
+    "ja",
+    "ty",
+    "wy",
+    "czy",
+    "kiedy",
 ];
 /// Common English words that are not also Polish, Czech or Croatian ones
 /// ("to", "a", "i", "no", "co", "do", "na" are).
@@ -95,10 +138,10 @@ const ENGLISH_WORDS: &[&str] = &[
     "they", "he", "she", "in", "for", "with", "be", "have", "has", "not", "but", "what", "so",
     "if", "can", "will", "just", "my", "your", "our", "there", "here", "yes", "okay", "yeah",
     "right", "about", "at", "from", "or", "an", "me", "know", "think", "like", "get", "would",
-    "should", "could", "i'm", "don't", "let's", "thank", "thanks", "please", "how", "why",
-    "when", "where", "which", "who", "all", "one", "some", "them", "his", "her", "been",
-    "does", "did", "go", "going", "want", "need", "see", "make", "good", "great", "sure",
-    "also", "then", "than", "because", "maybe", "now", "well", "really", "very",
+    "should", "could", "i'm", "don't", "let's", "thank", "thanks", "please", "how", "why", "when",
+    "where", "which", "who", "all", "one", "some", "them", "his", "her", "been", "does", "did",
+    "go", "going", "want", "need", "see", "make", "good", "great", "sure", "also", "then", "than",
+    "because", "maybe", "now", "well", "really", "very",
 ];
 /// Whisper words in a row without any punctuation that take Parakeet's.
 pub const UNPUNCTUATED_RUN: usize = 12;
@@ -497,7 +540,11 @@ fn fit_times(words: &mut [Word], alone: &[bool]) {
         while e < words.len() && alone[e] {
             e += 1;
         }
-        let lo = if k > 0 { words[k - 1].end } else { words[k].start };
+        let lo = if k > 0 {
+            words[k - 1].end
+        } else {
+            words[k].start
+        };
         let hi = if e < words.len() {
             words[e].start
         } else {
@@ -580,7 +627,8 @@ fn borrow_punctuation(words: &mut [Word], parakeet: &[Word]) {
             } else {
                 ends_sentence(&words[k - 1].text)
             };
-            if after_end && let Some(first) = words[k].text.chars().next()
+            if after_end
+                && let Some(first) = words[k].text.chars().next()
                 && first.is_lowercase()
             {
                 let rest = &words[k].text[first.len_utf8()..];
@@ -618,7 +666,10 @@ mod tests {
             text(&out),
             "Ну, там буде видно цю транзакцію чи ні? А це комісія за переказ, чи якась інша?"
         );
-        assert!(out.iter().all(|x| x.source.as_deref() == Some(SOURCE_WHISPER)));
+        assert!(
+            out.iter()
+                .all(|x| x.source.as_deref() == Some(SOURCE_WHISPER))
+        );
         // Whisper's own words stay even where Parakeet differs, and a short
         // run is left as it is.
         let w = words("так добре давай далі", 0.0);
@@ -646,7 +697,10 @@ mod tests {
         let p = words("Ну я тобі кажу що завтра", 0.0);
         let out = merge(&p, &w);
         let d = out.iter().find(|x| x.text == "дуже").unwrap();
-        assert!(d.start >= out[2].end - 1e-9 && d.end <= out[4].start + 1e-9, "{d:?}");
+        assert!(
+            d.start >= out[2].end - 1e-9 && d.end <= out[4].start + 1e-9,
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -660,14 +714,18 @@ mod tests {
             let w = words("Так, якщо можна поширити, будь ласка", 0.0);
             let out = merge(&p, &w);
             assert!(
-                out.iter().all(|x| x.source.as_deref() != Some(SOURCE_PARAKEET_EN)),
+                out.iter()
+                    .all(|x| x.source.as_deref() != Some(SOURCE_PARAKEET_EN)),
                 "{latin}: {}",
                 text(&out)
             );
         }
         let en = words("Okay, thank you, I think that is fine for now.", 0.0);
         assert!(looks_english(&en));
-        let names = words("Since the foundation of Asunción in 1537, Paraguay has managed", 0.0);
+        let names = words(
+            "Since the foundation of Asunción in 1537, Paraguay has managed",
+            0.0,
+        );
         assert!(looks_english(&names));
         assert!(looks_english(&words("Dashboard settings profile", 0.0)));
         assert!(looks_english(&words("Buenos Aires.", 0.0)));

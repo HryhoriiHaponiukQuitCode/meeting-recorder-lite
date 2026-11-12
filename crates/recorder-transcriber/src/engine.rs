@@ -53,8 +53,7 @@ pub fn provider() -> String {
                 "meeting-recorder-onnxruntime.conf.{}",
                 std::process::id()
             ));
-            match std::fs::write(&part, ORT_SETTINGS).and_then(|()| std::fs::rename(&part, &file))
-            {
+            match std::fs::write(&part, ORT_SETTINGS).and_then(|()| std::fs::rename(&part, &file)) {
                 Ok(()) => format!("cpu:{}", file.display()),
                 Err(e) => {
                     let _ = std::fs::remove_file(&part);

@@ -287,7 +287,10 @@ impl App {
             app.reader.query = q;
         }
         if let (Some(n), Some(Ok(t))) = (dev.edit_person, &app.reader.transcript) {
-            app.person_edit = t.people.get(n.saturating_sub(1)).map(reader::PersonEdit::of);
+            app.person_edit = t
+                .people
+                .get(n.saturating_sub(1))
+                .map(reader::PersonEdit::of);
         }
         if dev.delete {
             app.confirm_delete = dev.show.clone();
@@ -743,7 +746,9 @@ impl App {
             self.message = Some(Message {
                 text: format!(
                     "“{}” is not an audio or video file this app can import.",
-                    p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                    p.file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default()
                 ),
                 problem: true,
             });
@@ -1630,11 +1635,7 @@ impl App {
                 |ui| job_bar(ui, p),
                 |ui| {
                     if let Some((text, hint)) = status {
-                        let l = ui.label(
-                            RichText::new(text)
-                                .size(12.0)
-                                .color(ui::BLUE),
-                        );
+                        let l = ui.label(RichText::new(text).size(12.0).color(ui::BLUE));
                         if let Some(h) = hint {
                             l.on_hover_text(h);
                         }
@@ -1693,11 +1694,7 @@ impl App {
     /// The right side: the transcript of the selected recording, or what
     /// stands in for it (transcribing, not yet, failed, nothing selected).
     /// The transcript header's buttons, laid out right to left.
-    fn pane_buttons(
-        &mut self,
-        ui: &mut egui::Ui,
-        info: &SessionInfo,
-    ) -> Option<TranscriptAction> {
+    fn pane_buttons(&mut self, ui: &mut egui::Ui, info: &SessionInfo) -> Option<TranscriptAction> {
         let mut action = None;
         let busy = self.job.as_ref().is_some_and(|j| j.session() == info.dir)
             || self.queue.contains(&info.dir);
@@ -1765,7 +1762,11 @@ impl App {
             if title.double_clicked() {
                 self.start_renaming(info);
             }
-            ui.add(egui::Label::new(ui::muted(sub)).truncate().selectable(false));
+            ui.add(
+                egui::Label::new(ui::muted(sub))
+                    .truncate()
+                    .selectable(false),
+            );
         });
     }
 
@@ -2166,7 +2167,7 @@ impl App {
                         "Speech models · {:.1} GB",
                         self.model_size as f64 / 1_073_741_824.0
                     ))
-                        .color(ui::INK),
+                    .color(ui::INK),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     delete = ui::outline_small(ui, "Delete", None)
@@ -2222,11 +2223,16 @@ impl App {
         ui.add_space(ui::S3);
         ui::divider(ui);
         ui.add_space(ui::S3);
-        ui::setting(ui, "Transcribe automatically", "After each recording", |ui| {
-            if ui::toggle(ui, &mut self.settings.transcribe_automatically).changed() {
-                self.save_settings();
-            }
-        });
+        ui::setting(
+            ui,
+            "Transcribe automatically",
+            "After each recording",
+            |ui| {
+                if ui::toggle(ui, &mut self.settings.transcribe_automatically).changed() {
+                    self.save_settings();
+                }
+            },
+        );
         ui.add_space(ui::S3);
         ui::setting(
             ui,

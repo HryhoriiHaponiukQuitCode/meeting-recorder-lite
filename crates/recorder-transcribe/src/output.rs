@@ -223,7 +223,10 @@ pub fn participants(dialog: &[Utterance], me: Option<&str>) -> Vec<Participant> 
     // With several people on the microphone the user is the one who says
     // the most (nearest to it).
     let mut said: Vec<(Option<u32>, usize)> = Vec::new();
-    for u in dialog.iter().filter(|u| u.speaker == crate::Speaker::Me && !u.echo) {
+    for u in dialog
+        .iter()
+        .filter(|u| u.speaker == crate::Speaker::Me && !u.echo)
+    {
         let n = u.text.split_whitespace().count();
         match said.iter_mut().find(|(v, _)| *v == u.voice) {
             Some(s) => s.1 += n,
@@ -483,7 +486,11 @@ mod tests {
         let me = p.iter().find(|p| p.speaker == Speaker::Me).unwrap();
         assert_eq!(me.label, "Григорій");
         assert_eq!(me.given.as_deref(), Some("Григорій"));
-        assert!(participants(&d.utterances, Some(" ")).iter().all(|p| p.given.is_none()));
+        assert!(
+            participants(&d.utterances, Some(" "))
+                .iter()
+                .all(|p| p.given.is_none())
+        );
     }
 
     #[test]
@@ -493,8 +500,16 @@ mod tests {
         let auto = d.label(Speaker::Me, None);
         assert!(d.rename(Speaker::Me, None, "  Григорій \n Гапонюк "));
         assert_eq!(d.label(Speaker::Me, None), "Григорій Гапонюк");
-        assert!(txt(&d).contains("Григорій Гапонюк: Добрий день."), "{}", txt(&d));
-        let p = d.participants.iter().find(|p| p.speaker == Speaker::Me).unwrap();
+        assert!(
+            txt(&d).contains("Григорій Гапонюк: Добрий день."),
+            "{}",
+            txt(&d)
+        );
+        let p = d
+            .participants
+            .iter()
+            .find(|p| p.speaker == Speaker::Me)
+            .unwrap();
         assert_eq!(p.given.as_deref(), Some("Григорій Гапонюк"));
         // Empty: the automatic label again.
         assert!(d.rename(Speaker::Me, None, " "));
@@ -502,7 +517,10 @@ mod tests {
         assert!(d.participants.iter().all(|p| p.given.is_none()));
         // Long names are cut; nobody with this voice: refused.
         assert!(d.rename(Speaker::Others, None, &"я".repeat(200)));
-        assert_eq!(d.label(Speaker::Others, None).chars().count(), NAME_MAX_CHARS);
+        assert_eq!(
+            d.label(Speaker::Others, None).chars().count(),
+            NAME_MAX_CHARS
+        );
         assert!(!d.rename(Speaker::Others, Some(7), "Х"));
     }
 
@@ -516,9 +534,21 @@ mod tests {
         let back: Document =
             serde_json::from_slice(&fs::read(dir.join(JSON_FILE)).unwrap()).unwrap();
         assert_eq!(back.label(Speaker::Others, None), "Катя");
-        assert_ne!(back.label(Speaker::Me, None), "Катя", "the other keeps its own");
-        assert!(fs::read_to_string(dir.join(TXT_FILE)).unwrap().contains("Катя: Привіт."));
-        assert!(fs::read_to_string(dir.join(SRT_FILE)).unwrap().contains("Катя: Привіт."));
+        assert_ne!(
+            back.label(Speaker::Me, None),
+            "Катя",
+            "the other keeps its own"
+        );
+        assert!(
+            fs::read_to_string(dir.join(TXT_FILE))
+                .unwrap()
+                .contains("Катя: Привіт.")
+        );
+        assert!(
+            fs::read_to_string(dir.join(SRT_FILE))
+                .unwrap()
+                .contains("Катя: Привіт.")
+        );
         assert!(rename_participant(&dir, Speaker::Others, Some(3), "X").is_err());
         fs::remove_dir_all(dir).ok();
     }

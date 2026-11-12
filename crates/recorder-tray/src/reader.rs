@@ -290,12 +290,9 @@ pub fn people(
             if i > 0 {
                 ui.label(RichText::new("·").size(13.5).color(ui::INK_MUTED));
             }
-            let name = egui::Label::new(
-                RichText::new(&p.label)
-                    .size(13.5)
-                    .color(ui::INK_SECONDARY),
-            )
-            .selectable(false);
+            let name =
+                egui::Label::new(RichText::new(&p.label).size(13.5).color(ui::INK_SECONDARY))
+                    .selectable(false);
             if editable {
                 let r = ui
                     .add(name.sense(egui::Sense::click()))

@@ -66,7 +66,12 @@ impl ImportJob {
         let progress = Arc::new(Mutex::new(0.0));
         let cancel = Arc::new(AtomicBool::new(false));
         let result = Arc::new(Mutex::new(None));
-        let (p, c, r, f) = (progress.clone(), cancel.clone(), result.clone(), file.clone());
+        let (p, c, r, f) = (
+            progress.clone(),
+            cancel.clone(),
+            result.clone(),
+            file.clone(),
+        );
         std::thread::Builder::new()
             .name("import".into())
             .spawn(move || {
@@ -263,7 +268,11 @@ impl SymphoniaSource {
                 FormatOptions::default(),
                 MetadataOptions::default(),
             )
-            .map_err(|e| bad(format!("not an audio or video file this app can read ({e})")))?;
+            .map_err(|e| {
+                bad(format!(
+                    "not an audio or video file this app can read ({e})"
+                ))
+            })?;
         let track = format
             .default_track(TrackType::Audio)
             .ok_or_else(|| bad("the file has no sound"))?;
@@ -387,9 +396,9 @@ impl To16k {
             )
             .expect("valid resampler parameters")
         });
-        let (out_buf, skip) = rs
-            .as_ref()
-            .map_or((Vec::new(), 0), |r| (vec![0.0; r.output_frames_max()], r.output_delay()));
+        let (out_buf, skip) = rs.as_ref().map_or((Vec::new(), 0), |r| {
+            (vec![0.0; r.output_frames_max()], r.output_delay())
+        });
         Self {
             rs,
             fifo: Vec::new(),
@@ -542,7 +551,8 @@ mod tests {
         let n = (rate as f64 * secs) as usize;
         let mut data = Vec::with_capacity(n * channels as usize * 2);
         for i in 0..n {
-            let s = (0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / rate as f64).sin()
+            let s = (0.5
+                * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / rate as f64).sin()
                 * i16::MAX as f64) as i16;
             data.extend_from_slice(&s.to_le_bytes());
             for _ in 1..channels {
@@ -611,7 +621,13 @@ mod tests {
         assert!((secs - 12.0).abs() < 0.05, "{secs} s");
 
         let mut seen = Vec::new();
-        import(&voice, &root, &mut |p| seen.push(p), &AtomicBool::new(false)).unwrap();
+        import(
+            &voice,
+            &root,
+            &mut |p| seen.push(p),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert!(seen.windows(2).all(|w| w[0] <= w[1]), "never goes back");
         assert!(seen.iter().any(|p| (0.3..0.7).contains(p)), "{seen:?}");
         assert_eq!(seen.last(), Some(&1.0));

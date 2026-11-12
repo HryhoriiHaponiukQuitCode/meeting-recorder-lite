@@ -292,7 +292,10 @@ mod tests {
         assert!(dir.join(TXT_FILE).exists());
         m.transcript.as_mut().unwrap().status = TranscriptStatus::Done;
         m.save(&dir).unwrap();
-        assert!(matches!(info(&dir).unwrap().transcript, TranscriptState::Done(_)));
+        assert!(matches!(
+            info(&dir).unwrap().transcript,
+            TranscriptState::Done(_)
+        ));
         // The transcript goes; the audio and the name stay.
         delete_transcript_with(&dir, gone).unwrap();
         for f in [TXT_FILE, JSON_FILE, SRT_FILE] {
@@ -322,7 +325,10 @@ mod tests {
         assert_eq!(info(&dir).unwrap().title, None);
         set_title(&dir, "  Планування\n спринту  ").unwrap();
         assert_eq!(title(&dir).as_deref(), Some("Планування спринту"));
-        assert_eq!(info(&dir).unwrap().title.as_deref(), Some("Планування спринту"));
+        assert_eq!(
+            info(&dir).unwrap().title.as_deref(),
+            Some("Планування спринту")
+        );
         assert_eq!(list(&root)[0].title.as_deref(), Some("Планування спринту"));
         // The manifest is rewritten (the transcriber does that): the name stays.
         Manifest::load(&dir).unwrap().save(&dir).unwrap();

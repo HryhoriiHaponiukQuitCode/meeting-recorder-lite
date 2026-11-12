@@ -197,9 +197,7 @@ fn settings(opts: &Options) -> Settings {
             "greedy_search".into()
         },
         vad: vad_settings(),
-        chunking: format!(
-            "speech segments widened by {SEGMENT_PAD_S} s, joined without pauses"
-        ),
+        chunking: format!("speech segments widened by {SEGMENT_PAD_S} s, joined without pauses"),
         max_chunk_speech_s: MAX_CHUNK_SECONDS as u32,
         voices: opts.voices.then(VoiceSettings::current),
     }
@@ -539,9 +537,7 @@ fn run(
             &mut words[Speaker::Others.channel()].1,
             &[],
             &mut pacer,
-            &mut |done| {
-                progress.report(total_s * (after_whisper + half * done), false, report)
-            },
+            &mut |done| progress.report(total_s * (after_whisper + half * done), false, report),
             stop,
         )?;
         let echo = echo_spans(
@@ -559,7 +555,11 @@ fn run(
             &echo,
             &mut pacer,
             &mut |done| {
-                progress.report(total_s * (after_whisper + half * (1.0 + done)), false, report)
+                progress.report(
+                    total_s * (after_whisper + half * (1.0 + done)),
+                    false,
+                    report,
+                )
             },
             stop,
         )?;

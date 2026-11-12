@@ -581,7 +581,11 @@ fn people_apart(channel: Speaker) {
     } else {
         (silence, speech)
     };
-    let root = temp_root(if channel == Speaker::Me { "mic-voices" } else { "voices" });
+    let root = temp_root(if channel == Speaker::Me {
+        "mic-voices"
+    } else {
+        "voices"
+    });
     let dir = make_session(&root, 60, &left, &right);
     transcribe_opts(
         &dir,

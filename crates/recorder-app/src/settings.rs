@@ -129,7 +129,10 @@ mod tests {
     fn gentle_runs_in_the_background_on_a_mac_and_fast_does_not() {
         let gentle = Settings::default();
         assert!(gentle.gentle_transcription());
-        assert_eq!(gentle.transcription_in_background(), cfg!(target_os = "macos"));
+        assert_eq!(
+            gentle.transcription_in_background(),
+            cfg!(target_os = "macos")
+        );
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
         let expected = if cfg!(target_os = "macos") { 4 } else { 2 };
         assert_eq!(gentle.transcription_threads(), expected.min(cores));
