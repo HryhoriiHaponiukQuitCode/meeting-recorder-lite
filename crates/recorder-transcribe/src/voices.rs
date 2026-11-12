@@ -32,9 +32,13 @@ pub const MAX_CLUSTER_POINTS: usize = 3000;
 /// A voice with a smaller share of the windows is folded into another.
 pub const MIN_VOICE_SHARE: f64 = 0.03;
 /// On the microphone (the user's own) another voice needs at least this
-/// many words; fewer go to the voice that says the most. On the user's
-/// calls such voices were a repeated "Дякую" or a few words of a video.
-pub const MIC_MIN_WORDS: usize = 25;
+/// much speech (seconds of its words); less goes to the voice that says
+/// the most. Time, not words: spurious voices are many short words (one
+/// person on an hour of call with headphones got two more of 31 and 38
+/// words in 10–11 s, 7–9% of the words), a real second person at the
+/// microphone talks for minutes (262 s and more on the user's room
+/// meetings). A count of words (25 before) let the short ones through.
+pub const MIC_MIN_SPEECH_S: f64 = 30.0;
 
 /// Windows `(start, length)` in samples inside the speech segments; a
 /// segment shorter than a window is one window when long enough.
@@ -286,26 +290,31 @@ pub fn assign(words: &mut [Word], windows: &[(u64, usize)], prints: &[Vec<f32>])
     order.len() as u32
 }
 
-/// Voices with fewer than `min_words` words join the one with the most;
-/// numbers are given again by first appearance. Returns the number of
-/// voices left (0 for one: no voice on any word).
-pub fn fold_minor(words: &mut [Word], min_words: usize) -> u32 {
-    let mut count: Vec<(u32, usize)> = Vec::new();
+/// Voices with less than `min_speech_s` seconds of words join the one
+/// with the most words; numbers are given again by first appearance.
+/// Returns the number of voices left (0 for one: no voice on any word).
+pub fn fold_minor(words: &mut [Word], min_speech_s: f64) -> u32 {
+    // (voice, words, seconds of its words)
+    let mut count: Vec<(u32, usize, f64)> = Vec::new();
     for w in words.iter() {
         if let Some(v) = w.voice {
-            match count.iter_mut().find(|(x, _)| *x == v) {
-                Some(c) => c.1 += 1,
-                None => count.push((v, 1)),
+            let s = (w.end - w.start).max(0.0);
+            match count.iter_mut().find(|(x, ..)| *x == v) {
+                Some(c) => {
+                    c.1 += 1;
+                    c.2 += s;
+                }
+                None => count.push((v, 1, s)),
             }
         }
     }
-    let Some(&(main, _)) = count.iter().max_by_key(|(_, n)| *n) else {
+    let Some(&(main, ..)) = count.iter().max_by_key(|(_, n, _)| *n) else {
         return 0;
     };
     let kept: Vec<u32> = count
         .iter()
-        .filter(|(v, n)| *v == main || *n >= min_words)
-        .map(|(v, _)| *v)
+        .filter(|(v, _, s)| *v == main || *s >= min_speech_s)
+        .map(|(v, ..)| *v)
         .collect();
     // New numbers by first appearance of the voices kept.
     let mut order: Vec<u32> = Vec::new();
@@ -429,10 +438,11 @@ mod tests {
 
     #[test]
     fn minor_voices_fold_into_the_main_one() {
+        // Each word lasts a second: voice 2 says 5 words first (5 s), voice
+        // 1 the next 25 (25 s), voice 3 the last 30 (30 s, the most).
         let mut ws: Vec<Word> = (0..60)
             .map(|i| {
-                let mut w = Word::new("слово", i as f64, i as f64 + 0.5);
-                // Voice 2 says 5 words first, voice 1 the next 25, voice 3 30.
+                let mut w = Word::new("слово", i as f64, i as f64 + 1.0);
                 w.voice = Some(match i {
                     0..5 => 2,
                     5..30 => 1,
@@ -441,7 +451,7 @@ mod tests {
                 w
             })
             .collect();
-        assert_eq!(fold_minor(&mut ws, 25), 2);
+        assert_eq!(fold_minor(&mut ws, 25.0), 2);
         // Voice 2 joined the biggest (old 3), so it comes first now.
         assert_eq!(ws[0].voice, Some(1));
         assert_eq!(ws[10].voice, Some(2));
@@ -451,8 +461,32 @@ mod tests {
         for (i, w) in few.iter_mut().enumerate() {
             w.voice = Some(if i < 30 { 1 } else { 2 });
         }
-        assert_eq!(fold_minor(&mut few, 25), 0);
+        assert_eq!(fold_minor(&mut few, 25.0), 0);
         assert!(few.iter().all(|w| w.voice.is_none()));
+    }
+
+    /// Words count less than time: the extra "voices" of one person on a
+    /// call were dozens of short words in a few seconds (Odoo call: 31 and
+    /// 38 words, 10–11 s), while a real second person at the microphone
+    /// talks for minutes.
+    #[test]
+    fn many_short_words_are_not_a_person() {
+        let mut ws: Vec<Word> = Vec::new();
+        let mut at = 0.0;
+        let mut say = |n: usize, len: f64, voice: u32, ws: &mut Vec<Word>| {
+            for _ in 0..n {
+                let mut w = Word::new("так", at, at + len);
+                w.voice = Some(voice);
+                ws.push(w);
+                at += len + 0.1;
+            }
+        };
+        say(377, 0.6, 1, &mut ws); // the user: ~226 s
+        say(38, 0.3, 2, &mut ws); // replies in another tone: ~11 s
+        say(135, 0.5, 3, &mut ws); // someone else in the room: ~68 s
+        assert_eq!(fold_minor(&mut ws, MIC_MIN_SPEECH_S), 2);
+        assert!(ws[377..415].iter().all(|w| w.voice == Some(1)));
+        assert!(ws[415..].iter().all(|w| w.voice == Some(2)));
     }
 
     #[test]

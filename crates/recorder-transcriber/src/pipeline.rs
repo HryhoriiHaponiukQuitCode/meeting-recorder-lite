@@ -60,6 +60,9 @@ pub struct Channel<'e> {
     chunker: Chunker,
     /// Decoded chunks (timing only, samples dropped) and their results.
     decoded: Vec<(Chunk, ChunkResult)>,
+    /// The speech segments as the detector found them, before widening:
+    /// the voices are told apart on these (see [`ChannelWords::speech`]).
+    speech: Vec<(u64, usize)>,
 }
 
 impl<'e> Channel<'e> {
@@ -74,6 +77,7 @@ impl<'e> Channel<'e> {
             padder: Padder::new(f64::from(vad_settings().max_speech_s) + 10.0),
             chunker: Chunker::default(),
             decoded: Vec::new(),
+            speech: Vec::new(),
         })
     }
 
@@ -108,6 +112,7 @@ impl<'e> Channel<'e> {
 
     fn take_segments(&mut self, ckpt: &mut Option<Checkpoint>) -> Result<()> {
         while let Some(seg) = self.vad.front() {
+            self.speech.push((seg.start() as u64, seg.samples().len()));
             let (start, s) = self.padder.widen(seg.start() as u64, seg.samples());
             drop(seg);
             self.vad.pop();
@@ -386,9 +391,17 @@ fn stream_session(
 struct ChannelWords {
     speaker: Speaker,
     words: Vec<Word>,
-    /// Speech segments for the Whisper regions (macOS only).
+    /// Speech segments for the Whisper regions (macOS only), widened as
+    /// for Parakeet.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     segments: Vec<(u64, usize)>,
+    /// Speech segments as detected, for the voices. Not the widened ones:
+    /// 0.2 s on each side lifts a lone "так" over the half-second minimum
+    /// of a voice print, and such prints, mostly the quiet around one
+    /// word, made voices of their own (an hour of call with headphones
+    /// gave the user's microphone three). The voices were tuned, and are
+    /// relabelled (`relabel_voices`), on these.
+    speech: Vec<(u64, usize)>,
 }
 
 impl Channel<'_> {
@@ -407,6 +420,7 @@ impl Channel<'_> {
                 .flat_map(|(c, r)| transcript::chunk_words(c, r))
                 .collect(),
             segments,
+            speech: self.speech,
         }
     }
 }
@@ -502,8 +516,8 @@ fn run(
         [me.into_words(), others.into_words()]
     };
     progress.report(total_s * share, true, report);
-    let me_segments = channels[0].segments.clone();
-    let others_segments = channels[1].segments.clone();
+    let me_speech = channels[0].speech.clone();
+    let others_speech = channels[1].speech.clone();
 
     // Pass 2 (Best): Whisper on the speech regions, merged with Parakeet.
     let words: Vec<(Speaker, Vec<Word>)> = if opts.quality.needs_whisper() {
@@ -533,7 +547,7 @@ fn run(
             manifest,
             opts,
             Speaker::Others,
-            &others_segments,
+            &others_speech,
             &mut words[Speaker::Others.channel()].1,
             &[],
             &mut pacer,
@@ -550,7 +564,7 @@ fn run(
             manifest,
             opts,
             Speaker::Me,
-            &me_segments,
+            &me_speech,
             &mut words[Speaker::Me.channel()].1,
             &echo,
             &mut pacer,
@@ -633,7 +647,7 @@ fn voice_pass(
     })?;
     let n = assign_outside(words, skip, &kept, &prints);
     Ok(if channel == Speaker::Me {
-        voices::fold_minor(words, voices::MIC_MIN_WORDS)
+        voices::fold_minor(words, voices::MIC_MIN_SPEECH_S)
     } else {
         n
     })
@@ -780,7 +794,7 @@ pub fn relabel_voices(dir: &Path, opts: &Options) -> Result<(u32, u32)> {
     doc.others_voices = voices::assign(&mut others, &kept, &prints);
     let (kept, prints) = prints_of(&left, &echo)?;
     assign_outside(&mut me, &echo, &kept, &prints);
-    doc.me_voices = voices::fold_minor(&mut me, voices::MIC_MIN_WORDS);
+    doc.me_voices = voices::fold_minor(&mut me, voices::MIC_MIN_SPEECH_S);
     doc.settings.voices = Some(VoiceSettings::current());
     doc.utterances = dialog::merge(
         transcript::group(Speaker::Me, me),
