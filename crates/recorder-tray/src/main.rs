@@ -1648,9 +1648,16 @@ impl App {
     /// The section (Record, Recordings or Settings) in a scroll area,
     /// centred when there is room to spare.
     fn section(&mut self, ui: &mut egui::Ui) {
+        // No dragging to scroll (the wheel and trackpad scroll): a press
+        // would count as dragging the area, and everything under the
+        // pointer would lose its hover look until the button is released.
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("section", self.view as u8))
-            .auto_shrink([false, false]);
+            .auto_shrink([false, false])
+            .scroll_source(egui::containers::scroll_area::ScrollSource {
+                drag: false,
+                ..Default::default()
+            });
         if let Some(y) = self.scroll.take() {
             area = area.vertical_scroll_offset(y);
         }

@@ -393,6 +393,11 @@ pub fn body(ui: &mut egui::Ui, t: &Transcript, query: &str) {
     let q = lower_chars(query.trim());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        // Scrolled with the wheel or trackpad; dragging selects text.
+        .scroll_source(egui::containers::scroll_area::ScrollSource {
+            drag: false,
+            ..Default::default()
+        })
         .id_salt("transcript-body")
         .show(ui, |ui| {
             ui.add_space(ui::S2);
