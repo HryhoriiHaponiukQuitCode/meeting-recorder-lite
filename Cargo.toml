@@ -27,9 +27,12 @@ tracing = "0.1.44"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Thin LTO and parallel code generation: the heavy work runs in the C++
+# libraries (ONNX Runtime, whisper.cpp), which Rust's LTO does not touch,
+# while fat LTO with one code unit made every release link (each test
+# binary too) take minutes of full CPU.
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
 panic = "unwind"
 strip = true

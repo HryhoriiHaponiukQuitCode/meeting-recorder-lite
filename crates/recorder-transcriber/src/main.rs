@@ -24,6 +24,12 @@ use recorder_transcriber::pipeline::{self, Options};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+    /// Run as background work: on a Mac only on the efficiency cores,
+    /// which take several times less energy (cooler and quieter; the
+    /// processor stages are slower, Whisper on the graphics processor
+    /// hardly).
+    #[arg(long, global = true)]
+    background: bool,
 }
 
 #[derive(clap::Args)]
@@ -115,13 +121,36 @@ enum Cmd {
 }
 
 /// Transcription is background work: let recordings, calls and the user's
-/// other programs go first, and keep the fans quiet.
-fn lower_priority() {
+/// other programs go first.
+///
+/// `background` on a Mac also marks the process as background
+/// (`PRIO_DARWIN_BG`, as `taskpolicy -b`): its threads, including those
+/// ONNX Runtime and whisper.cpp start later, run only on the efficiency
+/// cores. Measured on an M4 MacBook Air, 6 minutes of speech with the
+/// Fast model: 334 J of processor energy on the performance cores against
+/// 108 J here, 43 s against 111 s; with Best 73 J against 36 J at about
+/// the same time (Whisper runs on the graphics processor), and the
+/// system's thermal pressure stayed moderate instead of heavy. A plain
+/// nice value does neither: the threads stay on the performance cores.
+fn lower_priority(background: bool) {
     #[cfg(unix)]
     // SAFETY: plain syscall on the current process.
     unsafe {
         libc::setpriority(libc::PRIO_PROCESS, 0, 10);
     }
+    #[cfg(target_os = "macos")]
+    if background {
+        // SAFETY: plain syscall on the current process.
+        let r = unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) };
+        if r != 0 {
+            eprintln!(
+                "background priority not set: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = background;
     #[cfg(windows)]
     // SAFETY: plain Win32 call on the current process.
     unsafe {
@@ -314,8 +343,8 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    lower_priority();
     let cli = Cli::parse();
+    lower_priority(cli.background);
     let json = matches!(&cli.cmd, Cmd::Session { json: true, .. });
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,

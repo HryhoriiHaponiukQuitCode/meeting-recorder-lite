@@ -4,7 +4,10 @@
 //! macOS reports the pressure as nominal, moderate, heavy, trapping or
 //! sleeping (`ProcessInfo.thermalState`: nominal, fair, serious, critical).
 //!
-//! - **Normal** (nominal, moderate): full speed; the fans handle it.
+//! - **Normal** (nominal, moderate): full speed. With the Gentle speed the
+//!   transcriber runs on the efficiency cores and on an M4 MacBook Air
+//!   (no fan) stays here; Fast on the performance cores reaches heavy
+//!   within a minute or two.
 //! - **Warm** (heavy): rest as long as the last stretch of work took, so the
 //!   transcriber uses at most half of the time it would.
 //! - **Hot** (trapping and above): stop and wait until it is no longer hot,

@@ -20,7 +20,7 @@ impl Embedder {
         let inner = SpeakerEmbeddingExtractor::create(&SpeakerEmbeddingExtractorConfig {
             model: Some(model.to_string_lossy().into_owned()),
             num_threads: threads.max(1) as i32,
-            provider: Some("cpu".into()),
+            provider: Some(crate::engine::provider()),
             ..Default::default()
         })
         .ok_or_else(|| anyhow!("cannot load the voice model (damaged file?)"))?;

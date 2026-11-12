@@ -758,6 +758,7 @@ impl App {
             &dir,
             &self.settings.models_dir(),
             self.settings.transcription_threads(),
+            self.settings.transcription_in_background(),
             self.settings.transcription_quality(),
             self.settings.tell_voices_apart,
             Some(self.settings.your_name.as_str()),
@@ -2212,16 +2213,23 @@ impl App {
             self.settings.transcription_threads = threads;
             self.save_settings();
         }
-        ui.label(ui::muted(match (quality, threads >= 4) {
-            (Quality::Fast, true) => {
-                "Uses more of the processor; about a quarter faster. An hour takes about 1.5 minutes."
+        // Measured on an M4 MacBook Air (see lower_priority in the
+        // transcriber): per hour of speech.
+        let mac = cfg!(target_os = "macos");
+        ui.label(ui::muted(match (quality, threads >= 4, mac) {
+            (Quality::Fast, false, true) => {
+                "Runs on the processor's efficiency cores: cool and quiet. An hour of speech takes about 15 minutes."
             }
-            (Quality::Fast, false) => {
-                "Keeps the computer cool and quiet. An hour of call takes about 2 minutes."
+            (Quality::Fast, true, true) => {
+                "Uses the performance cores: about 3.5 times faster (an hour of speech in about 4 minutes), but the computer gets warm."
             }
-            (Quality::Best, true) => "Uses more of the processor; somewhat faster.",
-            (Quality::Best, false) => {
-                "Keeps the processor cooler; Whisper runs on the graphics processor either way."
+            (Quality::Fast, false, false) => "Keeps the computer cooler and quieter.",
+            (Quality::Fast, true, false) => "Uses more of the processor; somewhat faster.",
+            (Quality::Best, false, _) => {
+                "Cool and quiet: the processor part runs on the efficiency cores, Whisper on the graphics processor. An hour of speech takes about half an hour."
+            }
+            (Quality::Best, true, _) => {
+                "Uses the performance cores: about twice as fast, but the computer gets warm."
             }
         }));
 

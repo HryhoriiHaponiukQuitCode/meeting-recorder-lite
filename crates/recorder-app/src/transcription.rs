@@ -185,6 +185,7 @@ impl TranscriptionJob {
         session: &Path,
         models_dir: &Path,
         threads: u32,
+        background: bool,
         quality: Quality,
         voices: bool,
         me_name: Option<&str>,
@@ -205,6 +206,9 @@ impl TranscriptionJob {
         if !voices {
             cmd.arg("--no-voices");
         }
+        if background {
+            cmd.arg("--background");
+        }
         if let Some(name) = me_name.map(str::trim).filter(|n| !n.is_empty()) {
             cmd.arg("--me-name").arg(name);
         }
@@ -215,7 +219,7 @@ impl TranscriptionJob {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn()?;
-        tracing::info!(session = %session.display(), threads, quality = quality.as_str(), voices, "transcription started");
+        tracing::info!(session = %session.display(), threads, background, quality = quality.as_str(), voices, "transcription started");
         let state = Arc::new(Mutex::new(JobState::default()));
         if let Some(out) = child.stdout.take() {
             let state = state.clone();

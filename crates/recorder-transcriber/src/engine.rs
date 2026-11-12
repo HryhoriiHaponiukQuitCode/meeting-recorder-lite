@@ -27,6 +27,45 @@ pub fn vad_settings() -> VadSettings {
     }
 }
 
+/// ONNX Runtime settings for every model: its worker threads sleep when
+/// they run out of work instead of spinning (busy-waiting) for the next
+/// piece, which by default burns processor time between the many small
+/// calls (the decoder runs once per token). Measured with 2 threads: the
+/// same text for about 6% less energy at the same speed.
+const ORT_SETTINGS: &str = "\
+SessionConfig.session.intra_op.allow_spinning=0
+SessionConfig.session.inter_op.allow_spinning=0
+";
+
+/// The sherpa-onnx provider: `cpu:<file>`, the file holding
+/// [`ORT_SETTINGS`] (sherpa-onnx passes `SessionConfig.*` keys on to ONNX
+/// Runtime and reads the file whenever a model loads). One file in the
+/// temporary folder, written once per process (a copy is renamed into
+/// place, so another transcriber never reads half of it); plain `cpu` if
+/// it cannot be written.
+pub fn provider() -> String {
+    static PROVIDER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROVIDER
+        .get_or_init(|| {
+            let dir = std::env::temp_dir();
+            let file = dir.join("meeting-recorder-onnxruntime.conf");
+            let part = dir.join(format!(
+                "meeting-recorder-onnxruntime.conf.{}",
+                std::process::id()
+            ));
+            match std::fs::write(&part, ORT_SETTINGS).and_then(|()| std::fs::rename(&part, &file))
+            {
+                Ok(()) => format!("cpu:{}", file.display()),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    eprintln!("ONNX Runtime settings not written ({e}): spinning threads");
+                    "cpu".into()
+                }
+            }
+        })
+        .clone()
+}
+
 fn path(p: &std::path::Path) -> Result<String> {
     if !p.is_file() {
         return Err(anyhow!("model file missing: {}", p.display()));
@@ -47,7 +86,7 @@ fn vad_config(vad: &std::path::Path) -> Result<VadModelConfig> {
         },
         sample_rate: SAMPLE_RATE as i32,
         num_threads: 1,
-        provider: Some("cpu".into()),
+        provider: Some(provider()),
         ..Default::default()
     })
 }
@@ -90,7 +129,7 @@ impl Engine {
         cfg.model_config.tokens = Some(path(&paths.tokens)?);
         cfg.model_config.model_type = Some("nemo_transducer".into());
         cfg.model_config.num_threads = threads.max(1) as i32;
-        cfg.model_config.provider = Some("cpu".into());
+        cfg.model_config.provider = Some(provider());
         cfg.decoding_method = Some("greedy_search".into());
         let recognizer = OfflineRecognizer::create(&cfg)
             .context("cannot load the speech model (damaged files or not enough memory)")?;

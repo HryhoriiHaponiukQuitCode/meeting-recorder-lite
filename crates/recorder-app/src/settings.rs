@@ -95,9 +95,51 @@ impl Settings {
         }
     }
 
-    /// Threads within 1..=available cores.
+    /// Gentle (the default) rather than Fast.
+    pub fn gentle_transcription(&self) -> bool {
+        self.transcription_threads < 4
+    }
+
+    /// Gentle on a Mac: the transcriber runs as background work, only on
+    /// the efficiency cores (see `meeting-recorder-transcribe
+    /// --background`).
+    pub fn transcription_in_background(&self) -> bool {
+        cfg!(target_os = "macos") && self.gentle_transcription()
+    }
+
+    /// Threads within 1..=available cores. In the background 4: on the
+    /// efficiency cores they are faster than 2 (111 s against 155 s for 6
+    /// minutes of speech) and still cool.
     pub fn transcription_threads(&self) -> u32 {
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
-        self.transcription_threads.clamp(1, cores.max(1))
+        let wanted = if self.transcription_in_background() {
+            4
+        } else {
+            self.transcription_threads
+        };
+        wanted.clamp(1, cores.max(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gentle_runs_in_the_background_on_a_mac_and_fast_does_not() {
+        let gentle = Settings::default();
+        assert!(gentle.gentle_transcription());
+        assert_eq!(gentle.transcription_in_background(), cfg!(target_os = "macos"));
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get() as u32);
+        let expected = if cfg!(target_os = "macos") { 4 } else { 2 };
+        assert_eq!(gentle.transcription_threads(), expected.min(cores));
+
+        let fast = Settings {
+            transcription_threads: 4,
+            ..Settings::default()
+        };
+        assert!(!fast.gentle_transcription());
+        assert!(!fast.transcription_in_background());
+        assert_eq!(fast.transcription_threads(), 4.min(cores));
     }
 }

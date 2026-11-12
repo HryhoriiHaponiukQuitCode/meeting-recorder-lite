@@ -110,7 +110,7 @@ enum Cmd {
         /// best (Whisper + Parakeet, macOS) or fast (Parakeet); default: the setting.
         #[arg(long)]
         quality: Option<String>,
-        /// Recognizer threads (default: the setting, 2).
+        /// Recognizer threads (default: from the Speed setting).
         #[arg(long)]
         threads: Option<u32>,
         /// Plain "Others" instead of Others 1, 2, … (default: the setting).
@@ -246,6 +246,9 @@ fn main() -> Result<()> {
                 .arg(quality.as_str());
             if no_voices || !settings.tell_voices_apart {
                 cmd.arg("--no-voices");
+            }
+            if settings.transcription_in_background() {
+                cmd.arg("--background");
             }
             let status = cmd.status().context("cannot start the transcriber")?;
             if !status.success() {
