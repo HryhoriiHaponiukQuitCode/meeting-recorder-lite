@@ -143,6 +143,8 @@ struct DevOptions {
     find: Option<String>,
     /// `--rename <text>`: the shown recording's name field, open with this.
     rename: Option<String>,
+    /// `--search <text>`: the search above the list of recordings.
+    search: Option<String>,
     /// `--edit-person <n>`: the name field of the shown transcript's n-th
     /// participant (from 1).
     edit_person: Option<usize>,
@@ -198,6 +200,8 @@ struct App {
     /// How many recordings the list has read, and how many there are.
     loaded: usize,
     sessions_total: usize,
+    /// The search above the list: only recordings whose name has it.
+    list_query: String,
     disk_checked: Instant,
     /// The recording whose transcript is on the right, and its state.
     reader: reader::Reader,
@@ -265,6 +269,7 @@ impl App {
             sessions: Vec::new(),
             loaded: LOAD_STEP,
             sessions_total: 0,
+            list_query: String::new(),
             disk_checked: Instant::now(),
             reader: reader::Reader::default(),
             shown: None,
@@ -309,6 +314,9 @@ impl App {
                 text,
                 focus: true,
             });
+        }
+        if let Some(q) = dev.search {
+            app.list_query = q;
         }
         app.check_disk();
         // First launch: ask for everything right away, so the system prompts
@@ -615,9 +623,7 @@ impl App {
         self.last_title = self.last.as_ref().and_then(|l| sessions::title(&l.dir));
         // The list reads every manifest, so only while it is on screen.
         if self.view == View::Recordings {
-            let (list, total) = sessions::page(&self.settings.recordings_dir(), 0, self.loaded);
-            self.sessions = list;
-            self.sessions_total = total;
+            self.load_list();
             // Opening the list shows a transcript: the one chosen before, or
             // the newest.
             if self.reader.dir().is_none()
@@ -629,6 +635,25 @@ impl App {
         self.reader.refresh();
         self.shown = self.reader.dir().and_then(sessions::info);
         self.disk_checked = Instant::now();
+    }
+
+    /// The recordings in the list: a page of the newest, or while
+    /// searching every one whose name has the query (all are read then,
+    /// so that older ones are found too).
+    fn load_list(&mut self) {
+        let root = self.settings.recordings_dir();
+        let query = self.list_query.trim().to_lowercase();
+        if query.is_empty() {
+            let (list, total) = sessions::page(&root, 0, self.loaded);
+            self.sessions = list;
+            self.sessions_total = total;
+        } else {
+            self.sessions = sessions::list(&root)
+                .into_iter()
+                .filter(|s| session_name(s).to_lowercase().contains(&query))
+                .collect();
+            self.sessions_total = self.sessions.len();
+        }
     }
 
     /// Starts the next import and handles a finished one: the new
@@ -1377,13 +1402,12 @@ impl App {
             }
         });
         ui::card(ui, |ui| {
+            if self.list_search(ui) {
+                self.load_list();
+            }
             let count = self.sessions.len();
             let total = self.sessions_total;
-            ui::card_header(ui, "All recordings", |ui| {
-                if total > 0 {
-                    ui.label(ui::muted(total.to_string()));
-                }
-            });
+            let searching = !self.list_query.trim().is_empty();
             if let Some(job) = &self.import {
                 let name = job
                     .file()
@@ -1427,10 +1451,13 @@ impl App {
                 }
             }
             if count == 0 {
-                ui.label(ui::muted(
+                ui.label(ui::muted(if searching {
+                    "No recording has this in its name.".to_string()
+                } else {
                     "No recordings yet. They appear here when you press Stop, or import an \
-                     audio or video file.",
-                ));
+                     audio or video file."
+                        .to_string()
+                }));
                 return;
             }
             if self.model_status != ModelStatus::Ready {
@@ -1462,6 +1489,32 @@ impl App {
         if let Some(a) = action {
             self.apply(a);
         }
+    }
+
+    /// The search above the list (by name; Escape or the cross clears it).
+    /// Room for the cross is kept even when empty, so the field does not
+    /// jump on the first letter. Returns whether the query changed.
+    fn list_search(&mut self, ui: &mut egui::Ui) -> bool {
+        let before = self.list_query.clone();
+        ui.horizontal(|ui| {
+            // The cross (26) and the gap before it; the width set is the
+            // text's, without the margins (2 × 10).
+            let room = 26.0 + ui.spacing().item_spacing.x;
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.list_query)
+                    .hint_text("Search recordings by name")
+                    .desired_width((ui.available_width() - room - 20.0).max(120.0))
+                    .margin(vec2(10.0, 7.0)),
+            );
+            if field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.list_query.clear();
+            }
+            if !self.list_query.is_empty() && ui::close_button(ui, "Clear the search").clicked() {
+                self.list_query.clear();
+            }
+        });
+        ui.add_space(ui::S2);
+        self.list_query != before
     }
 
     /// One recording: when, how long, transcript state and its button.
@@ -1519,19 +1572,14 @@ impl App {
         // room left, cut with "…" (ui::sides), so they never run under them.
         let near = inner.rect_contains_pointer(rect) || selected;
         let done = matches!(s.transcript, TranscriptState::Done(_));
-        let (name, sub) = match &s.title {
-            Some(t) => (
-                t.clone(),
-                format!(
-                    "{} · {} · {state}",
-                    when(s.started),
-                    duration_words(s.seconds)
-                ),
-            ),
-            None => (
+        let name = session_name(s);
+        let sub = match &s.title {
+            Some(_) => format!(
+                "{} · {} · {state}",
                 when(s.started),
-                format!("{} · {state}", duration_words(s.seconds)),
+                duration_words(s.seconds)
             ),
+            None => format!("{} · {state}", duration_words(s.seconds)),
         };
         if progress.is_some() {
             inner.add_space(2.0);
@@ -2646,6 +2694,12 @@ fn hms(s: u64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
+/// The name a recording is shown (and found) by: the one the user gave it,
+/// else when it started.
+fn session_name(s: &SessionInfo) -> String {
+    s.title.clone().unwrap_or_else(|| when(s.started))
+}
+
 /// "Today at 20:36", "Yesterday at 09:05", "24 Oct at 20:36".
 fn when(t: DateTime<Utc>) -> String {
     let local = t.with_timezone(&Local);
@@ -2737,6 +2791,7 @@ fn dev_options() -> DevOptions {
         show: value("--show").map(PathBuf::from),
         find: value("--find"),
         rename: value("--rename"),
+        search: value("--search"),
         edit_person: value("--edit-person").and_then(|v| v.parse().ok()),
         delete: args.iter().any(|a| a == "--delete"),
         import: value("--import").map(PathBuf::from),
