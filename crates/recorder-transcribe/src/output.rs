@@ -20,9 +20,24 @@ use serde::{Deserialize, Serialize};
 use crate::dialog::{Turn, turns};
 use crate::transcript::Utterance;
 
-pub const TXT_FILE: &str = "transcript.txt";
+/// The transcript as data: what the window reads and edits. Named the same
+/// in every recording.
 pub const JSON_FILE: &str = "transcript.json";
-pub const SRT_FILE: &str = "transcript.srt";
+/// The text and the subtitles are for people, so they carry the
+/// recording's start time and name: "2026-11-13_12-00_transcript.txt", or
+/// "<name>_2026-11-13_12-00_transcript.txt" once it is named (see
+/// [`file_base`]).
+pub const TEXT_SUFFIX: &str = "_transcript";
+/// Their names before November 2026 (found and renamed by
+/// [`sync_text_names`]).
+pub const OLD_TXT_FILE: &str = "transcript.txt";
+pub const OLD_SRT_FILE: &str = "transcript.srt";
+/// The recording's name, one line, written by the app when the user names
+/// it.
+pub const TITLE_FILE: &str = "title.txt";
+/// File names stay well under the 255-byte limit of most file systems
+/// (Cyrillic takes two bytes a letter).
+const BASE_MAX_BYTES: usize = 150;
 pub const FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -356,13 +371,156 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Writes all three files; returns their names.
+/// Writes all three files (the text and subtitles under the recording's
+/// current name, older copies removed); returns their names.
 pub fn write_all(dir: &Path, doc: &Document) -> io::Result<Vec<String>> {
     let json = serde_json::to_vec_pretty(doc).map_err(io::Error::other)?;
+    let (txt_name, srt_name) = (text_name(dir, "txt"), text_name(dir, "srt"));
     write_atomic(&dir.join(JSON_FILE), &json)?;
-    write_atomic(&dir.join(SRT_FILE), srt(doc).as_bytes())?;
-    write_atomic(&dir.join(TXT_FILE), txt(doc).as_bytes())?;
-    Ok(vec![TXT_FILE.into(), JSON_FILE.into(), SRT_FILE.into()])
+    write_atomic(&dir.join(&srt_name), srt(doc).as_bytes())?;
+    write_atomic(&dir.join(&txt_name), txt(doc).as_bytes())?;
+    sync_text_names(dir)?;
+    Ok(vec![txt_name, JSON_FILE.into(), srt_name])
+}
+
+/// What the text files are named after: when the recording started, from
+/// its folder ("2026-11-13_12-00"), always; with the recording's name
+/// ([`TITLE_FILE`], made safe for a file name) in front once it has one
+/// ("LA Client Meet_2026-11-13_12-00"). The date keeps the files of
+/// recordings with the same name apart and in order.
+pub fn file_base(dir: &Path) -> String {
+    let folder = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Session folders: "2026-11-13_12-00-58_<id>".
+    let date: String = folder.chars().take(16).collect();
+    let looks_like_date = date.len() == 16
+        && date.chars().enumerate().all(|(i, c)| {
+            matches!(i, 4 | 7 | 13) && c == '-'
+                || i == 10 && c == '_'
+                || !matches!(i, 4 | 7 | 10 | 13) && c.is_ascii_digit()
+        });
+    let when = if looks_like_date {
+        date
+    } else if folder.is_empty() {
+        "recording".into()
+    } else {
+        safe_file_name(&folder)
+    };
+    match fs::read_to_string(dir.join(TITLE_FILE))
+        .ok()
+        .map(|t| safe_file_name(&t))
+        .filter(|t| !t.is_empty())
+    {
+        Some(name) => format!("{name}_{when}"),
+        None => when,
+    }
+}
+
+/// `name` as a file name on any system: one line, without / \ : * ? " < >
+/// | and control characters (each becomes "-"), no dots or spaces at the
+/// ends, at most [`BASE_MAX_BYTES`].
+pub fn safe_file_name(name: &str) -> String {
+    let one_line = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mapped: String = one_line
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut out = String::new();
+    for c in mapped.trim_matches(|c: char| c == '.' || c == ' ').chars() {
+        if out.len() + c.len_utf8() > BASE_MAX_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    out.trim_end_matches(['.', ' ']).to_string()
+}
+
+/// "<name>_transcript.<ext>" for the recording in `dir`.
+pub fn text_name(dir: &Path, ext: &str) -> String {
+    format!("{}{TEXT_SUFFIX}.{ext}", file_base(dir))
+}
+
+/// Text or subtitle files of a transcript in `dir` under any name (an
+/// older name of the recording, or the names before November 2026).
+fn text_files(dir: &Path, ext: &str) -> Vec<std::path::PathBuf> {
+    let ending = format!("{TEXT_SUFFIX}.{ext}");
+    let old = format!("transcript.{ext}");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            !n.starts_with('.') && (n.ends_with(&ending) || n == old)
+        })
+        .map(|e| e.path())
+        .collect();
+    out.sort();
+    out
+}
+
+/// The transcript's text file in `dir`, under whatever name it has now.
+pub fn txt_path(dir: &Path) -> Option<std::path::PathBuf> {
+    let want = dir.join(text_name(dir, "txt"));
+    if want.is_file() {
+        return Some(want);
+    }
+    text_files(dir, "txt").into_iter().next()
+}
+
+/// Every text and subtitle file of the transcript in `dir`.
+pub fn text_paths(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut all = text_files(dir, "txt");
+    all.extend(text_files(dir, "srt"));
+    all
+}
+
+/// Gives the text and subtitle files the recording's current name (after
+/// it is renamed, or for transcripts from before names): one of each is
+/// renamed, other copies removed. A change of letter case alone goes
+/// through a temporary name, as the Mac's and Windows' file systems see
+/// both as one file.
+pub fn sync_text_names(dir: &Path) -> io::Result<()> {
+    for ext in ["txt", "srt"] {
+        let name = text_name(dir, ext);
+        let want = dir.join(&name);
+        let mut have = false;
+        for f in text_files(dir, ext) {
+            let current = f
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if current == name {
+                have = true;
+            } else if current.to_lowercase() == name.to_lowercase() {
+                let tmp = dir.join(format!(".{name}.case"));
+                fs::rename(&f, &tmp)?;
+                fs::rename(&tmp, &want)?;
+                have = true;
+            }
+        }
+        for f in text_files(dir, ext) {
+            if f == want {
+                continue;
+            }
+            if have {
+                fs::remove_file(&f)?;
+            } else {
+                fs::rename(&f, &want)?;
+                have = true;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -560,17 +718,98 @@ mod tests {
             "the other keeps its own"
         );
         assert!(
-            fs::read_to_string(dir.join(TXT_FILE))
+            fs::read_to_string(txt_path(&dir).unwrap())
                 .unwrap()
                 .contains("Катя: Привіт.")
         );
         assert!(
-            fs::read_to_string(dir.join(SRT_FILE))
+            fs::read_to_string(dir.join(text_name(&dir, "srt")))
                 .unwrap()
                 .contains("Катя: Привіт.")
         );
         assert!(rename_participant(&dir, Speaker::Others, Some(3), "X").is_err());
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// The text and subtitles carry the recording's start time, and its
+    /// name in front once it has one; they follow a rename.
+    #[test]
+    fn text_files_are_named_after_the_recording() {
+        let root = std::env::temp_dir().join(format!("mr-names-{}", std::process::id()));
+        let dir = root.join("2026-11-13_12-00-58_a55931a9-73");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dir).unwrap();
+        let names = |dir: &Path| {
+            let mut v: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        let files = write_all(&dir, &doc()).unwrap();
+        assert_eq!(
+            files,
+            [
+                "2026-11-13_12-00_transcript.txt",
+                "transcript.json",
+                "2026-11-13_12-00_transcript.srt"
+            ]
+        );
+        // Named: the files follow, and no older copy is left.
+        fs::write(dir.join(TITLE_FILE), "LA Cleint Meet\n").unwrap();
+        sync_text_names(&dir).unwrap();
+        assert_eq!(
+            names(&dir),
+            [
+                "LA Cleint Meet_2026-11-13_12-00_transcript.srt",
+                "LA Cleint Meet_2026-11-13_12-00_transcript.txt",
+                TITLE_FILE,
+                JSON_FILE
+            ]
+        );
+        assert!(
+            txt_path(&dir)
+                .unwrap()
+                .ends_with("LA Cleint Meet_2026-11-13_12-00_transcript.txt")
+        );
+        // Only the case changes (one file to the Mac): still renamed.
+        fs::write(dir.join(TITLE_FILE), "LA client meet").unwrap();
+        sync_text_names(&dir).unwrap();
+        assert!(
+            names(&dir).contains(&"LA client meet_2026-11-13_12-00_transcript.txt".to_string())
+        );
+        assert_eq!(text_paths(&dir).len(), 2);
+        // Written again after a rename: one pair, the new name.
+        fs::write(dir.join(TITLE_FILE), "Нарада: план / Q4?").unwrap();
+        write_all(&dir, &doc()).unwrap();
+        assert_eq!(
+            names(&dir)
+                .iter()
+                .filter(|n| n.contains(TEXT_SUFFIX))
+                .collect::<Vec<_>>(),
+            [
+                "Нарада- план - Q4-_2026-11-13_12-00_transcript.srt",
+                "Нарада- план - Q4-_2026-11-13_12-00_transcript.txt"
+            ]
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unsafe_names_become_safe_file_names() {
+        assert_eq!(
+            safe_file_name("  a/b\\c:d*e?f\"g<h>i|j \n k "),
+            "a-b-c-d-e-f-g-h-i-j k"
+        );
+        assert_eq!(safe_file_name("..hidden."), "hidden");
+        assert_eq!(safe_file_name(" ... "), "");
+        let long = safe_file_name(&"Нарада ".repeat(40));
+        assert!(
+            long.len() <= BASE_MAX_BYTES && !long.ends_with(' '),
+            "{long}"
+        );
+        assert!(long.is_char_boundary(long.len()));
     }
 
     #[test]

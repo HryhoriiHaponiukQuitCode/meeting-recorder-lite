@@ -26,7 +26,7 @@ use recorder_transcribe::Speaker;
 use recorder_transcribe::checkpoint::PARTIAL_FILE;
 use recorder_transcribe::dialog::normalized_words;
 use recorder_transcribe::model::{ModelPaths, Quality};
-use recorder_transcribe::output::{Document, JSON_FILE, TXT_FILE};
+use recorder_transcribe::output::{Document, JSON_FILE, txt_path};
 use recorder_transcribe::protocol::Message;
 use recorder_transcriber::engine::Engine;
 use recorder_transcriber::pipeline::{self, Options};
@@ -291,7 +291,7 @@ fn sessions_become_a_dialogue_with_speakers_and_times() {
         assert!(u.start <= u.end);
     }
     assert!(doc.utterances.windows(2).all(|w| w[0].start <= w[1].start));
-    let txt = std::fs::read_to_string(one.join(TXT_FILE)).unwrap();
+    let txt = std::fs::read_to_string(txt_path(&one).unwrap()).unwrap();
     // Labels from the participants: the microphone speaks first.
     let me_label = doc.label(Speaker::Me, None);
     let others_label = doc.label(Speaker::Others, None);
@@ -648,7 +648,7 @@ fn people_apart(channel: Speaker) {
     // In order of appearance: the first reader is voice 1, the second 2.
     assert_eq!(top(&by_clip["1272-128104-0004"]).0, 1);
     assert_eq!(top(&by_clip["1462-170138-0024"]).0, 2);
-    let txt = std::fs::read_to_string(dir.join(TXT_FILE)).unwrap();
+    let txt = std::fs::read_to_string(txt_path(&dir).unwrap()).unwrap();
     for v in 1..=4 {
         let label = d.label(channel, Some(v));
         assert!(txt.contains(&format!("] {label}: ")), "{label}");

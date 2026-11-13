@@ -230,6 +230,11 @@ impl App {
         let settings = Settings::load();
         // What an import cut short by a crash or a quit left behind.
         import::clean(&settings.recordings_dir());
+        // Transcripts from before the text files carried the recording's
+        // name get it (a quick rename; screenshots leave files alone).
+        if dev.screenshot.is_none() {
+            sessions::sync_all_names(&settings.recordings_dir());
+        }
         let last = sessions::latest(&settings.recordings_dir()).map(|s| LastRecording {
             dir: s.dir,
             started: s.started,
@@ -1711,7 +1716,7 @@ impl App {
         match (&info.transcript, busy) {
             (TranscriptState::Done(txt), false) => {
                 if ui::outline_small(ui, "Open file", None)
-                    .on_hover_text("transcript.txt in your text editor")
+                    .on_hover_text("The transcript as text, in your text editor")
                     .clicked()
                 {
                     action = Some(TranscriptAction::Open(txt.clone()));

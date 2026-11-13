@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 
 use recorder_core::manifest::{Manifest, TranscriptStatus};
 use recorder_transcribe::model::{self, DownloadProgress, ModelStatus};
-use recorder_transcribe::output::TXT_FILE;
+use recorder_transcribe::output;
 use recorder_transcribe::protocol::Message;
 
 pub use recorder_transcribe::model::{ATTRIBUTION, Phase, Quality, download_size, missing_bytes};
@@ -67,10 +67,10 @@ pub fn transcript_state(session: &Path) -> TranscriptState {
 pub fn transcript_state_of(m: &Manifest, session: &Path) -> TranscriptState {
     match &m.transcript {
         Some(t) => match t.status {
-            TranscriptStatus::Done if session.join(TXT_FILE).is_file() => {
-                TranscriptState::Done(session.join(TXT_FILE))
-            }
-            TranscriptStatus::Done => TranscriptState::None,
+            TranscriptStatus::Done => match output::txt_path(session) {
+                Some(txt) => TranscriptState::Done(txt),
+                None => TranscriptState::None,
+            },
             TranscriptStatus::Running => TranscriptState::Running,
             TranscriptStatus::Failed => {
                 TranscriptState::Failed(t.error.clone().unwrap_or_default())
@@ -299,7 +299,10 @@ impl TranscriptionJob {
             return None;
         }
         let outcome = match (st.done, st.error) {
-            (Some(_), _) if status.success() => JobOutcome::Done(self.session.join(TXT_FILE)),
+            (Some(_), _) if status.success() => JobOutcome::Done(
+                output::txt_path(&self.session)
+                    .unwrap_or_else(|| self.session.join(output::text_name(&self.session, "txt"))),
+            ),
             (_, Some(e)) => JobOutcome::Failed(e),
             _ => JobOutcome::Failed(format!(
                 "the transcriber stopped unexpectedly ({status}); not enough memory?"

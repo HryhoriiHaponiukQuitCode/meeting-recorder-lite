@@ -254,12 +254,10 @@ fn main() -> Result<()> {
             if !status.success() {
                 anyhow::bail!("transcription failed");
             }
-            println!(
-                "{}",
-                session
-                    .join(recorder_transcribe::output::TXT_FILE)
-                    .display()
-            );
+            let txt = recorder_transcribe::output::txt_path(&session).unwrap_or_else(|| {
+                session.join(recorder_transcribe::output::text_name(&session, "txt"))
+            });
+            println!("{}", txt.display());
             Ok(())
         }
         Cmd::Model {

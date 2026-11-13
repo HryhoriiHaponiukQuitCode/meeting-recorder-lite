@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use recorder_core::manifest::{self, Manifest, Status, TranscriptStatus};
 use recorder_transcribe::checkpoint::PARTIAL_FILE;
-use recorder_transcribe::output::{JSON_FILE, SRT_FILE, TXT_FILE};
+use recorder_transcribe::output::{self, JSON_FILE};
 
 use crate::transcription::{TranscriptState, transcript_state_of};
 
@@ -54,7 +54,7 @@ impl SessionInfo {
 /// in `manifest.json`: the recorder and the transcriber rewrite the manifest
 /// while they work and would drop a name given meanwhile. The folder keeps
 /// its name (the start time), which orders the list.
-pub const TITLE_FILE: &str = "title.txt";
+pub use recorder_transcribe::output::TITLE_FILE;
 /// Longer names are cut.
 pub const TITLE_MAX_CHARS: usize = 120;
 
@@ -88,14 +88,35 @@ pub fn set_title(dir: &Path, name: &str) -> io::Result<()> {
     let name = clean_title(name);
     let path = dir.join(TITLE_FILE);
     if name.is_empty() {
-        return match fs::remove_file(&path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            r => r,
-        };
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        sync_names(dir);
+        return Ok(());
     }
     let tmp = dir.join(format!("{TITLE_FILE}.tmp"));
     fs::write(&tmp, format!("{name}\n"))?;
-    fs::rename(&tmp, &path)
+    fs::rename(&tmp, &path)?;
+    sync_names(dir);
+    Ok(())
+}
+
+/// The transcript's text and subtitle files take the recording's name
+/// ("<name>_<date>_transcript.txt"). A failure leaves the old names, which are
+/// still found.
+fn sync_names(dir: &Path) {
+    if let Err(e) = output::sync_text_names(dir) {
+        tracing::warn!(dir = %dir.display(), error = %e, "transcript files not renamed");
+    }
+}
+
+/// Gives the transcript files of every recording in `root` their names
+/// (transcripts made before the files carried them; once, at launch).
+pub fn sync_all_names(root: &Path) {
+    for dir in folders(root) {
+        sync_names(&dir);
+    }
 }
 
 /// Moves `paths` to the system Trash (Recycle Bin on Windows), so a
@@ -131,11 +152,12 @@ fn delete_transcript_with(
     remove: impl Fn(&[PathBuf]) -> io::Result<()>,
 ) -> io::Result<()> {
     let mut m = busy(dir)?;
-    let files: Vec<PathBuf> = [TXT_FILE, JSON_FILE, SRT_FILE, PARTIAL_FILE]
+    let mut files: Vec<PathBuf> = [JSON_FILE, PARTIAL_FILE]
         .iter()
         .map(|f| dir.join(f))
         .filter(|p| p.exists())
         .collect();
+    files.extend(output::text_paths(dir));
     if !files.is_empty() {
         remove(&files)?;
     }
@@ -272,10 +294,18 @@ mod tests {
         session(&root, "call", 5, Status::Completed, 60_000);
         let dir = root.join("call");
         std::fs::write(dir.join("part_0001.ogg"), b"audio").unwrap();
-        for f in [TXT_FILE, JSON_FILE, SRT_FILE] {
+        // A transcript from before the files carried the recording's name:
+        // naming the recording renames them.
+        for f in [output::OLD_TXT_FILE, JSON_FILE, output::OLD_SRT_FILE] {
             std::fs::write(dir.join(f), b"text").unwrap();
         }
         set_title(&dir, "Нарада").unwrap();
+        let (txt, srt) = (
+            dir.join("Нарада_call_transcript.txt"),
+            dir.join("Нарада_call_transcript.srt"),
+        );
+        assert!(txt.exists() && srt.exists());
+        assert!(!dir.join(output::OLD_TXT_FILE).exists());
         let mut m = Manifest::load(&dir).unwrap();
         m.transcript = Some(TranscriptInfo {
             status: TranscriptStatus::Running,
@@ -289,7 +319,7 @@ mod tests {
         // Being transcribed: refused, nothing touched.
         assert!(delete_transcript_with(&dir, gone).is_err());
         assert!(delete_recording_with(&dir, gone).is_err());
-        assert!(dir.join(TXT_FILE).exists());
+        assert!(txt.exists());
         m.transcript.as_mut().unwrap().status = TranscriptStatus::Done;
         m.save(&dir).unwrap();
         assert!(matches!(
@@ -298,8 +328,8 @@ mod tests {
         ));
         // The transcript goes; the audio and the name stay.
         delete_transcript_with(&dir, gone).unwrap();
-        for f in [TXT_FILE, JSON_FILE, SRT_FILE] {
-            assert!(!dir.join(f).exists(), "{f}");
+        for f in [&txt, &dir.join(JSON_FILE), &srt] {
+            assert!(!f.exists(), "{}", f.display());
         }
         let s = info(&dir).unwrap();
         assert_eq!(s.transcript, TranscriptState::None);
