@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "block2 0.6.2",
  "cpal",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "ogg",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-transcribe"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-transcriber"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2793,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "recorder-tray"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
