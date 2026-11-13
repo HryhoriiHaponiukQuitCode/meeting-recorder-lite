@@ -92,8 +92,9 @@ pub struct Document {
     /// one or not separated).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub me_voices: u32,
-    /// Who speaks: a name found in the conversation, else "Participant N"
-    /// (see [`crate::names`]). Empty in transcripts made before names.
+    /// Who speaks: the user's name on the microphone (from the settings) or
+    /// one the user gave, else "Participant N". Names are never guessed
+    /// from the conversation. Empty in transcripts made before names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub participants: Vec<Participant>,
     pub utterances: Vec<Utterance>,
@@ -105,15 +106,13 @@ pub struct Participant {
     pub speaker: crate::Speaker,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<u32>,
-    /// Found in the conversation ("Дякую, Роман, за коментар").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Given by the user in the window ([`rename_participant`]); wins over
-    /// the found name.
+    /// Given by the user: their own name from the settings, or one typed
+    /// in the window ([`rename_participant`]). (Transcripts made before
+    /// November 2026 may also hold a `name` guessed from the conversation;
+    /// it is no longer read.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub given: Option<String>,
-    /// What the text shows: the given name, the found one or
-    /// "Participant N".
+    /// What the text shows: the given name or "Participant N".
     pub label: String,
 }
 
@@ -134,8 +133,7 @@ pub const NAME_MAX_CHARS: usize = 60;
 
 impl Document {
     /// Names the participant `speaker`/`voice`; an empty `name` brings back
-    /// the name found in the call (or "Participant N"). False when no
-    /// utterance is theirs.
+    /// "Participant N". False when no utterance is theirs.
     pub fn rename(&mut self, speaker: crate::Speaker, voice: Option<u32>, name: &str) -> bool {
         if !self
             .utterances
@@ -171,7 +169,6 @@ impl Document {
                         self.participants.push(found.clone().unwrap_or(Participant {
                             speaker,
                             voice,
-                            name: None,
                             given: None,
                             label: crate::transcript::label(speaker, voice),
                         }));
@@ -183,10 +180,8 @@ impl Document {
         let p = &mut self.participants[i];
         if name.is_empty() {
             p.given = None;
-            p.label = p
-                .name
-                .clone()
-                .or_else(|| found.map(|f| f.label))
+            p.label = found
+                .map(|f| f.label)
                 .unwrap_or_else(|| crate::transcript::label(speaker, voice));
         } else {
             p.given = Some(name.clone());
@@ -215,14 +210,13 @@ pub fn rename_participant(
     write_all(dir, &doc).map(|_| ())
 }
 
-/// Participants of a dialogue with their labels (names where found).
-///
-/// The microphone is the user: their name is `me` (from the settings),
-/// never one guessed from the call. Guesses for it were mostly someone the
-/// user talked about ("асайнила Андрія" made the user Андрій).
+/// Participants of a dialogue with their labels: `me` (the user's name
+/// from the settings) for the microphone voice that says the most, else
+/// "Participant N", numbered in order of appearance. Nothing is guessed
+/// from what is said: guesses were often someone the people talked about
+/// ("асайнила Андрія" made the user Андрій), and the user renames
+/// participants in the window instead.
 pub fn participants(dialog: &[Utterance], me: Option<&str>) -> Vec<Participant> {
-    let mut names = crate::names::find(dialog);
-    names.retain(|(speaker, _), _| *speaker != crate::Speaker::Me);
     let me = me.map(clean_name).filter(|n| !n.is_empty());
     // With several people on the microphone the user is the one who says
     // the most (nearest to it).
@@ -238,22 +232,29 @@ pub fn participants(dialog: &[Utterance], me: Option<&str>) -> Vec<Participant> 
         }
     }
     let user_voice = said.iter().max_by_key(|(_, n)| *n).and_then(|(v, _)| *v);
-    let mut labels_from = names.clone();
-    if let Some(n) = &me {
-        labels_from.insert((crate::Speaker::Me, user_voice), n.clone());
-    }
-    crate::names::labels(dialog, &labels_from)
-        .into_iter()
-        .map(|((speaker, voice), label)| Participant {
+    // Everyone else is "Participant N", numbered in order of appearance.
+    let mut out: Vec<Participant> = Vec::new();
+    let mut n = 0;
+    for u in dialog.iter().filter(|u| !u.echo) {
+        let (speaker, voice) = (u.speaker, u.voice);
+        if out.iter().any(|p| p.speaker == speaker && p.voice == voice) {
+            continue;
+        }
+        let given = (speaker == crate::Speaker::Me && voice == user_voice)
+            .then(|| me.clone())
+            .flatten();
+        let label = given.clone().unwrap_or_else(|| {
+            n += 1;
+            format!("Participant {n}")
+        });
+        out.push(Participant {
             speaker,
             voice,
-            name: names.get(&(speaker, voice)).cloned(),
-            given: (speaker == crate::Speaker::Me && voice == user_voice)
-                .then(|| me.clone())
-                .flatten(),
+            given,
             label,
-        })
-        .collect()
+        });
+    }
+    out
 }
 
 /// One line, spaces collapsed, at most [`NAME_MAX_CHARS`].
@@ -443,21 +444,18 @@ mod tests {
             Participant {
                 speaker: Speaker::Others,
                 voice: Some(1),
-                name: None,
                 given: None,
                 label: "Participant 1".into(),
             },
             Participant {
                 speaker: Speaker::Others,
                 voice: Some(2),
-                name: Some("Катя".into()),
-                given: None,
+                given: Some("Катя".into()),
                 label: "Катя".into(),
             },
             Participant {
                 speaker: Speaker::Me,
                 voice: None,
-                name: None,
                 given: None,
                 label: "Participant 2".into(),
             },
@@ -484,7 +482,7 @@ mod tests {
         d.utterances[1].text = "Привіт, Андрію.".into();
         let p = participants(&d.utterances, None);
         let me = p.iter().find(|p| p.speaker == Speaker::Me).unwrap();
-        assert_eq!((me.name.as_deref(), me.given.as_deref()), (None, None));
+        assert_eq!(me.given.as_deref(), None);
         assert!(me.label.starts_with("Participant "), "{me:?}");
         let p = participants(&d.utterances, Some("  Григорій "));
         let me = p.iter().find(|p| p.speaker == Speaker::Me).unwrap();
@@ -495,6 +493,24 @@ mod tests {
                 .iter()
                 .all(|p| p.given.is_none())
         );
+    }
+
+    /// What people call each other never names anyone: everyone is
+    /// "Participant N" until the user renames them.
+    #[test]
+    fn names_said_in_the_call_are_not_taken() {
+        let mut d = doc();
+        d.utterances[0].text = "Дякую, Роман, за коментар. Каті, розкажи.".into();
+        d.utterances[1].text = "Мене звати Оля, я з маркетингу.".into();
+        let p = participants(&d.utterances, None);
+        assert_eq!(p.len(), 2);
+        assert!(p.iter().all(|p| p.given.is_none()), "{p:?}");
+        let labels: Vec<&str> = p.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Participant 1", "Participant 2"]);
+        // The user's name from the settings does not shift the numbers.
+        let p = participants(&d.utterances, Some("Григорій"));
+        let labels: Vec<&str> = p.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["Participant 1", "Григорій"]);
     }
 
     #[test]

@@ -272,8 +272,8 @@ pub fn people(
         save |= save_click;
         cancel |= cancel_click;
         ui.label(ui::muted(
-            "Renames them in the whole transcript and its files. Leave empty for the \
-             name found in the call.",
+            "Renames them in the whole transcript and its files. Leave empty for \
+             \"Participant N\".",
         ));
         if cancel {
             *edit = None;
